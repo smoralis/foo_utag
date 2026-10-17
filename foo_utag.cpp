@@ -19,7 +19,7 @@ using json = nlohmann::json;
 
 DECLARE_COMPONENT_VERSION(
     "utag Input",
-    "1.0.0",
+    "1.0.1",
     "Adds internet radio streams and other remote URLs to the Media Library.\n"
     "\n"
     "Each .utag file is a small JSON stub that stores a stream URL (\"@\") together\n"
@@ -352,6 +352,40 @@ namespace
     };
 
     initquit_factory_t<handoff_initquit> g_handoff_initquit_factory;
+
+    // -------------------------------------------------------------------------
+    // Last known technical info (codec, bitrate, ...) of the playing stream.
+    // Retag / Properties / library reloads open the stub without a decoder
+    // (input_open_info_*), which would otherwise wipe the codec info.
+    // -------------------------------------------------------------------------
+    std::mutex g_techMutex;
+    std::string g_techUrl;
+    file_info_impl g_techInfo;
+    bool g_techValid = false;
+
+    void tech_store(const std::string& url, const file_info& src)
+    {
+        // Only cache info that actually names a codec.
+        if (src.info_get("codec") == nullptr)
+            return;
+
+        std::lock_guard<std::mutex> lock(g_techMutex);
+        g_techInfo.reset();
+        g_techInfo.copy_info(src);
+        g_techUrl = url;
+        g_techValid = true;
+    }
+
+    bool tech_load(const std::string& url, file_info& dst)
+    {
+        std::lock_guard<std::mutex> lock(g_techMutex);
+
+        if (!g_techValid || g_techUrl != url)
+            return false;
+
+        dst.copy_info(g_techInfo);
+        return true;
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -599,12 +633,28 @@ public:
                 file_info_impl decoderInfo;
                 m_decoder->get_info(0, decoderInfo, abort);
 
-                // copy_info() replaces the whole info section.
-                info.copy_info(decoderInfo);
+                if (decoderInfo.info_get("codec") != nullptr)
+                {
+                    // copy_info() replaces the whole info section.
+                    info.copy_info(decoderInfo);
+                    tech_store(m_url, decoderInfo);
+                }
+                else
+                {
+                    // e.g. a handed-off decoder reporting no codec
+                    tech_load(m_url, info);
+                }
             }
             catch (const exception_io&)
             {
+                tech_load(m_url, info);
             }
+        }
+        else
+        {
+            // Retag / Properties / library reload: no decoder is opened,
+            // reuse the last known technical info for this URL.
+            tech_load(m_url, info);
         }
 
         // Set last so copy_info() above cannot overwrite it.
