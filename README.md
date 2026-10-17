@@ -50,6 +50,7 @@ The file is UTF-8 JSON. A UTF-8 BOM is accepted. Files must be non-empty and no 
 3. Restart foobar2000 if required by your installation method.
 
 This repository source declares the component name as **utag Input** and validates the component filename as `foo_utag.dll`.
+Releases contain both 32-bit and 64-bit dll.
 
 ## Adding a station to the Media Library
 
