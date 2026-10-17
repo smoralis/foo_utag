@@ -1,0 +1,7 @@
+/foo_utag
+/Release
+/x64
+/.vs
+.gitattributes
+foo_utag.sln
+foo_utag.vcxproj*
