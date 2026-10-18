@@ -36,7 +36,7 @@ DECLARE_COMPONENT_VERSION(
     "- Library-friendly: scanning never connects to the stream\n"
     "- Editable tags, saved back into the .utag file\n"
     "- Stream URL shown in Properties under Other (%__@%)\n"
-    "- Playlist context menu: Utilities > Create utag files...\n"
+    "- Playlist context menu: Tagging > Create utag files...\n"
     "- Set default utag folder... / Create utag files in default folder: no prompt\n"
     "- Main menu: File > Add internet radio url and create utag (enter a URL, get a .utag)\n"
     "\n"
@@ -572,6 +572,11 @@ public:
     {
         bool hasTitle = false;
 
+        // foobar2000 keeps ReplayGain in file_info's replaygain_info, not in
+        // the meta fields; that is what the Properties dialog edits.
+        replaygain_info replayGain = info.get_replaygain();
+        bool hasReplayGain = false;
+
         // Read metadata from the .utag JSON object.
         for (auto it = m_json.begin(); it != m_json.end(); ++it)
         {
@@ -580,6 +585,17 @@ public:
 
             if (is_reserved_key(key) || value.is_null())
                 continue;
+
+            if (replaygain_info::g_is_meta_replaygain(key.c_str()))
+            {
+                if (!value.is_array() && !value.is_object())
+                {
+                    const std::string text = json_value_to_string(value);
+                    if (replayGain.set_from_meta(key.c_str(), text.c_str()))
+                        hasReplayGain = true;
+                }
+                continue;
+            }
 
             if (lowercase_ascii(key) == "title")
                 hasTitle = true;
@@ -607,6 +623,9 @@ public:
                 info.meta_set(key.c_str(), text.c_str());
             }
         }
+
+        if (hasReplayGain)
+            info.set_replaygain(replayGain);
 
         // Use the display name as a title if JSON has no title.
         if (!hasTitle && !m_displayName.empty())
@@ -870,8 +889,12 @@ public:
 
             const std::string key(name);
 
-            if (is_reserved_key(key))
+            // ReplayGain is written from replaygain_info below.
+            if (is_reserved_key(key) ||
+                replaygain_info::g_is_meta_replaygain(key.c_str()))
+            {
                 continue;
+            }
 
             const t_size count = info.meta_enum_value_count(i);
             std::vector<std::string> values;
@@ -901,6 +924,20 @@ public:
                 updated[key] = std::move(valuesArray);
             }
         }
+
+        // ReplayGain values as edited in Properties (old ones were erased above,
+        // so clearing a field removes it from the file).
+        const replaygain_info replayGain = info.get_replaygain();
+        replaygain_info::t_text_buffer buffer;
+
+        if (replayGain.format_track_gain(buffer))
+            updated["replaygain_track_gain"] = buffer;
+        if (replayGain.format_track_peak(buffer))
+            updated["replaygain_track_peak"] = buffer;
+        if (replayGain.format_album_gain(buffer))
+            updated["replaygain_album_gain"] = buffer;
+        if (replayGain.format_album_peak(buffer))
+            updated["replaygain_album_peak"] = buffer;
 
         commit_json(std::move(updated), abort);
     }
