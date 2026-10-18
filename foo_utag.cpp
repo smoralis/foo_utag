@@ -24,7 +24,7 @@ using json = nlohmann::json;
 
 DECLARE_COMPONENT_VERSION(
     "utag Input",
-    "1.0.2",
+    "1.0.3",
     "Adds internet radio streams and other remote URLs to the Media Library.\n"
     "\n"
     "Each .utag file is a small JSON stub that stores a stream URL (\"@\") together\n"
@@ -222,6 +222,56 @@ static double json_duration_to_seconds(const json& value)
     }
 
     return 0.0;
+}
+
+static bool is_local_file_reference(const std::string& url)
+{
+    // file:// references, including file://C:\Music\track.m4a
+    if (url.size() >= 7) {
+        const char prefix[] = "file://";
+        bool matches = true;
+
+        for (size_t i = 0; i < 7; ++i) {
+            char c = url[i];
+
+            if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+
+            if (c != prefix[i]) {
+                matches = false;
+                break;
+            }
+        }
+
+        if (matches) {
+            return true;
+        }
+    }
+
+    // Windows drive paths, e.g. C:\Music\track.m4a
+    if (url.size() >= 3) {
+        const char drive = url[0];
+
+        const bool is_drive_letter =
+            (drive >= 'A' && drive <= 'Z') ||
+            (drive >= 'a' && drive <= 'z');
+
+        if (is_drive_letter &&
+            url[1] == ':' &&
+            (url[2] == '\\' || url[2] == '/')) {
+            return true;
+        }
+    }
+
+    // UNC paths, e.g. \\server\share\track.m4a
+    if (url.size() >= 2 &&
+        url[0] == '\\' &&
+        url[1] == '\\') {
+        return true;
+    }
+
+    return false;
 }
 
 // -----------------------------------------------------------------------------
@@ -435,21 +485,17 @@ public:
 
     ~input_utag()
     {
-        // Park the running decoder so a new instance for the
-        // same URL can continue the stream instead of reconnecting.
-        try
+        if (m_initialized &&
+            !m_aborted &&
+            m_decoder.is_valid() &&
+            m_reason == input_open_decode &&
+            handoff_enabled() &&
+            !is_local_file_reference(m_url))
         {
-            if (m_initialized &&
-                !m_aborted &&
-                m_decoder.is_valid() &&
-                m_reason == input_open_decode &&
-                handoff_enabled())
-            {
-                handoff_store(m_url, m_decoder);
-            }
-        }
-        catch (...)
-        {
+            console::formatter() << "[foo_utag] handing off decoder: @ = "
+                << m_url.c_str();
+
+            handoff_store(m_url, m_decoder);
         }
     }
 
@@ -2189,3 +2235,203 @@ g_add_url_utag_mainmenu_factory;
 
 static contextmenu_item_factory_t<create_utag_context_menu>
 g_create_utag_context_menu_factory;
+
+
+class utag_album_art_extractor : public album_art_extractor_v2
+{
+public:
+    bool is_our_path(
+        const char* path,
+        const char* extension
+    ) override
+    {
+        (void)path;
+
+        return extension != nullptr
+            && pfc::stricmp_ascii(extension, "utag") == 0;
+    }
+
+    album_art_extractor_instance_ptr open(
+        file_ptr fileHint,
+        const char* path,
+        abort_callback& abort
+    ) override
+    {
+        (void)fileHint;
+
+        if (path == nullptr || *path == '\0')
+            throw exception_io_data();
+
+        // Open the .utag file and read its JSON.
+        service_ptr_t<file> file;
+        filesystem::g_open_read(file, path, abort);
+
+        const t_filesize size = file->get_size_ex(abort);
+
+        if (size == 0 || size > kMaxStubSize)
+            throw exception_io_data();
+
+        std::string buffer(static_cast<size_t>(size), '\0');
+
+        file->seek(0, abort);
+        file->read_object(
+            buffer.data(),
+            static_cast<t_size>(buffer.size()),
+            abort
+        );
+
+        file.release();
+
+        // Support a UTF-8 BOM.
+        if (buffer.size() >= 3 &&
+            static_cast<unsigned char>(buffer[0]) == 0xEF &&
+            static_cast<unsigned char>(buffer[1]) == 0xBB &&
+            static_cast<unsigned char>(buffer[2]) == 0xBF)
+        {
+            buffer.erase(0, 3);
+        }
+
+        // Expected format: [ { "@": "reference path", ... } ]
+        json parsed = json::parse(buffer, nullptr, false);
+
+        if (parsed.is_discarded() ||
+            !parsed.is_array() ||
+            parsed.size() != 1 ||
+            !parsed[0].is_object())
+        {
+            throw exception_io_data();
+        }
+
+        const auto it = parsed[0].find("@");
+
+        if (it == parsed[0].end() ||
+            !it->is_string() ||
+            it->get<std::string>().empty())
+        {
+            throw exception_album_art_not_found();
+        }
+
+        // Convert the existing file://C:\... representation
+        // into a native Windows path before asking foobar2000
+        // to open the referenced file's artwork extractor.
+        const std::string reference =
+            to_native_windows_path(it->get<std::string>());
+
+        abort.check();
+
+        // Delegate artwork reading to the referenced file type.
+        // No artwork editor is registered for .utag.
+        return album_art_extractor::g_open(
+            nullptr,
+            reference.c_str(),
+            abort
+        );
+    }
+
+    GUID get_guid() override
+    {
+        return g_utag_guid;
+    }
+};
+
+static service_factory_single_t<utag_album_art_extractor>
+g_utag_album_art_extractor_factory;
+
+// Exposes the artwork editor for the audio file referenced by a .utag file.
+// The artwork is edited in the referenced audio file, not in the .utag JSON.
+class utag_album_art_editor : public album_art_editor_v2
+{
+public:
+    bool is_our_path(
+        const char* path,
+        const char* extension) override
+    {
+        (void)path;
+
+        return extension != nullptr
+            && pfc::stricmp_ascii(extension, "utag") == 0;
+    }
+
+    album_art_editor_instance_ptr open(
+        file_ptr fileHint,
+        const char* path,
+        abort_callback& abort) override
+    {
+        (void)fileHint;
+
+        if (path == nullptr || *path == '\0') {
+            throw exception_io_data();
+        }
+
+        // Read the .utag JSON file.
+        service_ptr_t<file> input;
+        filesystem::g_open_read(input, path, abort);
+
+        const t_filesize fileSize = input->get_size_ex(abort);
+
+        if (fileSize == 0 || fileSize > kMaxStubSize) {
+            throw exception_io_data();
+        }
+
+        std::string buffer(
+            static_cast<size_t>(fileSize), '\0');
+
+        input->seek(0, abort);
+        input->read_object(
+            buffer.data(),
+            static_cast<t_size>(buffer.size()),
+            abort);
+
+        input.release();
+
+        // Accept a UTF-8 BOM if present.
+        if (buffer.size() >= 3
+            && static_cast<unsigned char>(buffer[0]) == 0xEF
+            && static_cast<unsigned char>(buffer[1]) == 0xBB
+            && static_cast<unsigned char>(buffer[2]) == 0xBF)
+        {
+            buffer.erase(0, 3);
+        }
+
+        // Validate the existing .utag structure:
+        // [ { "@": "file://..." } ]
+        json parsed = json::parse(buffer, nullptr, false);
+
+        if (parsed.is_discarded()
+            || !parsed.is_array()
+            || parsed.size() != 1
+            || !parsed[0].is_object())
+        {
+            throw exception_io_data();
+        }
+
+        const auto it = parsed[0].find("@");
+
+        if (it == parsed[0].end()
+            || !it->is_string()
+            || it->get_ref<const std::string&>().empty())
+        {
+            throw exception_io_data();
+        }
+
+        // Resolve the referenced audio file.
+        const std::string reference =
+            to_native_windows_path(
+                it->get_ref<const std::string&>());
+
+        abort.check();
+
+        // Delegate to the registered editor for the actual audio format.
+        // This may throw if that format has no artwork editor.
+        return album_art_editor::g_open(
+            nullptr, reference.c_str(), abort);
+    }
+
+    GUID get_guid() override
+    {
+        return g_utag_guid;
+    }
+};
+
+static service_factory_single_t<utag_album_art_editor>
+g_utag_album_art_editor_factory;
