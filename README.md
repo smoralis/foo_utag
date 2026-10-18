@@ -12,6 +12,7 @@ The `.utag` file stores the stream URL and metadata. foobar2000 can scan and tag
 - **Create files from a playlist:** use **Tagging → Create utag files...** in the playlist context menu to create one `.utag` file for each selected track.
 - **Default folder:** **Tagging → Set default utag folder...** saves an output folder, and **Tagging → Create utag files in default folder** creates the files there without asking.
 - **Add a station by URL:** **File → Add internet radio url and create utag** asks for a stream URL (and an optional name) and creates the `.utag` file in the default folder. If no name is entered, it is looked up from the stream.
+- **Import from Radio Browser:** **File → Import stations from Radio Browser...** downloads stations from the [Radio Browser](https://www.radio-browser.info/) directory and creates one `.utag` file per station, in a new folder named after the search.																																																														
 - **Results popup:** every created or skipped entry lists the stream URL (`@`) and the output path; errors list the source URL and the reason.
 - **Optional stream handoff:** an Advanced preference can reuse the running decoder when the playing item is reopened after retagging, helping avoid a reconnect and audible pause.
 
@@ -64,6 +65,25 @@ Releases contain both 32-bit and 64-bit dll.
 
 Library scans use the metadata-only open path and do not intentionally connect to the stream. Technical information is obtained from the decoder during playback.
 
+## Importing stations from Radio Browser
+
+1. Choose **File → Import stations from Radio Browser...**. It sits in the same block of the File menu as the add-by-URL command.
+2. Fill in any filters; all of them are optional:
+   - **Name contains** and **Tag / genre**
+   - **Country code**: two letters, such as `DE`
+   - **Min. bitrate (kbps)**
+   - **Maximum stations**: 1 to 5000, default 100
+3. Press **Import**. If no default folder is saved yet, you are asked to choose one first.
+
+Every import goes into its own new sub folder of the default folder, named after the search and the date and time, for example `Radio Browser - jazz - DE - 128+ kbps - top 100 - 2026-10-18 14-32-05` (tag, name, country code and minimum bitrate appear only when you filled them in). Earlier imports are therefore never mixed with new ones. No folder is created when nothing is found or the download fails.
+
+The most-clicked working stations that match are downloaded (broken stations are left out), with an **Abort** button while the list is fetched. The component tries `de1.api.radio-browser.info` first and falls back to the `de2`, `nl1` and `at1` mirrors.
+
+Each station becomes a `.utag` file with its stream URL (`url_resolved`, or `url` if that is empty) as `@`, plus `name`, `title`, `genre` (one value per tag), `country`, `countrycode`, `language`, `codec`, `bitrate`, `homepage`, `favicon` and `stationuuid` when the directory has them. Stations without a name or an http(s) URL are skipped. A station that repeats a stream URL already used earlier in the same search is skipped too. Files are never overwritten; duplicate names receive a numeric suffix.
+
+When the import finishes, the new files are also added to a new playlist named like the search folder, and that playlist becomes the active one. The results popup shows its name.
+
+The results popup lists the first 60 stations in detail (stream URL `@` and output path) and the summary counts all of them. If Radio Browser cannot be reached, nothing is created and an error is shown.
 ## Creating `.utag` files from a playlist
 
 1. Select one or more playlist tracks.
@@ -121,6 +141,7 @@ This behavior is intended to reduce reconnects and audible pauses when retagging
 - The component does not connect to a stream during a library metadata scan.
 - The source limits `.utag` files to 4 MiB.
 - The playlist creation commands skip selected entries whose paths already end in `.utag`.
+- Radio Browser import needs an internet connection and uses the SDK's `http_client`; it fetches at most 5000 stations per run.
 - The station name lookup only reads HTTP response headers; it cannot find names for servers that do not send `icy-name` or `ice-name`.
 - Dark mode in the input box needs foobar2000 v2.0 or later; the folder chooser is a Windows dialog and follows the Windows theme.
 
