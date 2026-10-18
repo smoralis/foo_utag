@@ -124,6 +124,49 @@ This behavior is intended to reduce reconnects and audible pauses when retagging
 - The station name lookup only reads HTTP response headers; it cannot find names for servers that do not send `icy-name` or `ice-name`.
 - Dark mode in the input box needs foobar2000 v2.0 or later; the folder chooser is a Windows dialog and follows the Windows theme.
 
+
+## Local File References and Metadata Separation
+
+The component supports **local file references**, allowing a `.utag` file to reference an audio file stored on the local filesystem. For example:
+
+```json
+[
+  {
+    "@": "file://C:\\Users\\Username\\Music\\Example.m4a",
+    "TITLE": "Example Track",
+    "ARTIST": "Example Artist",
+    "ALBUM": "Example Album"
+  }
+]
+```
+
+The `@` field identifies the referenced audio file. The component uses this reference to access the original audio and retrieve its media information.
+
+### Non-destructive metadata storage
+
+The component is designed to keep metadata separate from the original audio files:
+
+- **External metadata:** Tags are stored in `.utag` JSON files rather than written into the original audio files.
+- **Original files remain unchanged:** Updating or removing metadata through the component modifies the `.utag` file, not the referenced audio file's embedded tags.
+- **Local file support:** References can point to audio files on local Windows drives.
+- **Artwork integration:** Album artwork can be read through the referenced audio file. Artwork editing is delegated to the registered artwork editor for that file, rather than being stored in the `.utag` JSON.
+
+This separation helps preserve original media files while allowing metadata to be managed independently.
+
+**Note:** The component's metadata operations do not modify the referenced audio file. Artwork changes are a separate operation delegated to the referenced file's artwork editor and may modify the original audio file, depending on the editor and format.
+
+## Example
+
+For an audio file such as:
+
+`C:\Users\Username\Music\Example.m4a`
+
+The corresponding `.utag` file can store its reference and metadata separately:
+
+`C:\Users\Username\Music\utags\Example.utag`
+
+Editing the title, artist, album, or other supported metadata updates the `.utag` file, leaving the original audio file untouched by those metadata operations.
+
 ## Building
 
 The provided source is a C++ foobar2000 component and includes:
