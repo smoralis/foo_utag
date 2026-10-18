@@ -10,6 +10,9 @@ The `.utag` file stores the stream URL and metadata. foobar2000 can scan and tag
 - **Editable metadata:** tag changes are written back to the `.utag` JSON file.
 - **Stream URL in Properties:** the URL is exposed in the information section as `@` and can be displayed with `%__@%`.
 - **Create files from a playlist:** use **Tagging → Create utag files...** in the playlist context menu to create one `.utag` file for each selected track.
+- **Default folder:** **Tagging → Set default utag folder...** saves an output folder, and **Tagging → Create utag files in default folder** creates the files there without asking.
+- **Add a station by URL:** **File → Add internet radio url and create utag** asks for a stream URL (and an optional name) and creates the `.utag` file in the default folder. If no name is entered, it is looked up from the stream.
+- **Results popup:** every created or skipped entry lists the stream URL (`@`) and the output path; errors list the source URL and the reason.
 - **Optional stream handoff:** an Advanced preference can reuse the running decoder when the playing item is reopened after retagging, helping avoid a reconnect and audible pause.
 
 ## `.utag` file format
@@ -65,12 +68,32 @@ Library scans use the metadata-only open path and do not intentionally connect t
 
 1. Select one or more playlist tracks.
 2. Open the playlist context menu.
-3. Choose **Tagging → Create utag files...**.
-4. Choose the destination folder.
+3. Choose one of the commands under **Tagging**:
+   - **Create utag files...** asks for the destination folder each time and remembers the last one used.
+   - **Create utag files in default folder** creates the files in the default folder without asking. If no default folder is saved yet, or the saved folder no longer exists, you are asked to choose one first.
+   - **Set default utag folder...** only chooses and saves the default folder.
+4. Read the results popup, which lists each entry's stream URL (`@`) and the file it was written to.
 
 The component attempts to derive the station name and title from the selected tracks' metadata. It copies other metadata fields and preserves multi-value tags. Files are created without overwriting existing files; duplicate names receive a numeric suffix such as `Station (2).utag`.
 
-Existing `.utag` entries are skipped by this command. Tracks that do not expose usable metadata may fall back to a title or URL-derived filename.
+Existing `.utag` entries are skipped by these commands. Tracks that do not expose usable metadata may fall back to a title or URL-derived filename.
+
+## Adding a station by URL
+
+1. Choose **File → Add internet radio url and create utag**. The command is in the same block of the File menu as Add files, Add folder and Add location.
+2. Enter the stream URL. It must be a full URL such as `http://host:8000/stream`.
+3. Optionally enter a station name.
+4. Press **Create**. The `.utag` file is written to the default folder (see above); if none is set, you are asked to choose one first.
+
+If the name field is empty, the component connects to the stream briefly and reads the station name from the `icy-name` (or `ice-name`) response header. No audio is downloaded, and a progress box with an **Abort** button appears if the lookup takes a moment. The result depends on the lookup:
+
+- **Name found:** it is used as the station name and file name, and the results popup notes "(name from stream)".
+- **Server reachable but no name sent:** the host (and port) from the URL is used as the name.
+- **Server unreachable:** no file is created. The results popup shows an error with the URL and the reason, and the summary counts it as failed.
+- **Aborted:** no file is created, and the results popup says the lookup was cancelled.
+- **Name typed in:** no lookup is made, so an unreachable server does not block creating the file.
+
+Files are never overwritten; duplicate names receive a numeric suffix such as `Station (2).utag`. 
 
 ## Editing tags
 
@@ -97,15 +120,19 @@ This behavior is intended to reduce reconnects and audible pauses when retagging
 - Live-stream metadata and technical information may depend on the source and decoder.
 - The component does not connect to a stream during a library metadata scan.
 - The source limits `.utag` files to 4 MiB.
-- The playlist creation command skips selected entries whose paths already end in `.utag`.
+- The playlist creation commands skip selected entries whose paths already end in `.utag`.
+- The station name lookup only reads HTTP response headers; it cannot find names for servers that do not send `icy-name` or `ice-name`.
+- Dark mode in the input box needs foobar2000 v2.0 or later; the folder chooser is a Windows dialog and follows the Windows theme.
 
 ## Building
 
 The provided source is a C++ foobar2000 component and includes:
 
-- the foobar2000 SDK header `SDK/foobar2000.h`;
+- the foobar2000 SDK header `SDK/foobar2000.h`, plus `SDK/coreDarkMode.h` for dark mode support;
 - the `nlohmann/json.hpp` JSON header;
 - Windows SDK headers and libraries, including `Ole32.lib` and `Shell32.lib`.
+
+The station name lookup uses the SDK's `http_client` service, so the SDK version must provide it.
 
 Build it with a compatible Windows C++ toolchain and foobar2000 SDK setup. The source uses the component filename `foo_utag.dll`. Exact project-generation and build commands depend on your local SDK and build environment.
 
