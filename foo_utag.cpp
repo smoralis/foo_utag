@@ -4,6 +4,7 @@
 
 #include <Windows.h>
 #include <shlobj.h>
+#include <urlmon.h>
 #include <initializer_list>
 #include <string>
 #include <vector>
@@ -19,17 +20,19 @@
 #include <cwchar>
 #include <iterator>
 #include <fstream>
+#include <thread>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #pragma comment(lib, "Ole32.lib")
 #pragma comment(lib, "Shell32.lib")
+#pragma comment(lib, "Urlmon.lib")
 
 using json = nlohmann::json;
 
 DECLARE_COMPONENT_VERSION(
     "utag Input",
-    "1.0.4",
+    "1.0.5",
     "Adds internet radio streams and other remote URLs to the Media Library.\n"
     "\n"
     "Each .utag file is a small JSON stub that stores a stream URL (\"@\") together\n"
@@ -45,6 +48,7 @@ DECLARE_COMPONENT_VERSION(
     "- Set default utag folder... / Create utag files in default folder: no prompt\n"
     "- Main menu: File > Add internet radio url and create utag (enter a URL, get a .utag)\n"
     "- Main menu: File > Import stations from Radio Browser... (creates many .utag files)\n"
+    "- Optional playback-time favicon download (Preferences > Advanced > Tools)\n"
     "\n"
     "utag format: [ { \"@\": \"http://host:port/stream\", \"name\": \"Station\", ... } ]"
 );
@@ -306,6 +310,252 @@ static bool handoff_enabled()
     return g_adv_handoff.get_static_instance().get_state();
 }
 
+
+// Optional playback-time favicon download. The image is stored beside the
+// .utag file, using the same basename and the favicon URL's file extension.
+static const GUID g_guid_adv_favicon =
+{ 0x6f4f9b12, 0x8a3d, 0x4d2c, { 0x91, 0x70, 0x2b, 0x4c, 0x61, 0x7e, 0x35, 0xa9 } };
+
+static advconfig_checkbox_factory g_adv_favicon(
+    "utag: download favicon image during playback",
+    g_guid_adv_favicon,
+    advconfig_branch::guid_branch_tools,
+    1,
+    false);
+
+static bool favicon_download_enabled()
+{
+    return g_adv_favicon.get_static_instance().get_state();
+}
+
+static const GUID g_guid_adv_logging =
+{ 0x9d8c1a2b, 0x1234, 0x4a2b, { 0x91, 0x70, 0x2b, 0x4c, 0x61, 0x7e, 0x35, 0xb1 } };
+
+static advconfig_checkbox_factory g_adv_logging(
+    "utag: enable console logging",
+    g_guid_adv_logging,
+    advconfig_branch::guid_branch_tools,
+    2,
+    true);
+
+static bool utag_console_logging_enabled()
+{
+    return g_adv_logging.get_static_instance().get_state();
+}
+
+// Convenience logging macro used throughout this file. Replace existing
+// direct `console::printf(...)` calls with `UTAG_LOG(...)` to respect the preference.
+#define UTAG_LOG(...) \
+    do { if (utag_console_logging_enabled()) console::printf(__VA_ARGS__); } while(0)
+
+
+static std::mutex g_faviconMutex;
+static std::set<std::wstring> g_faviconInFlight;
+
+// Helper: accepted URL file extensions (lowercase, include leading dot).
+static bool is_known_image_ext(const std::string& ext)
+{
+    const std::string lower = lowercase_ascii(ext);
+    static const char* const allowed[] = {
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"
+    };
+    for (const char* a : allowed)
+        if (lower == a) return true;
+    return false;
+}
+
+static bool is_image_file_by_magic(const std::wstring& path)
+{
+    // Read a few leading bytes and check common image signatures.
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    unsigned char buf[16] = { 0 };
+    DWORD got = 0;
+    const BOOL ok = ReadFile(h, buf, sizeof(buf), &got, nullptr);
+    CloseHandle(h);
+    if (!ok || got == 0) return false;
+
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (got >= 8 &&
+        buf[0] == 0x89 && buf[1] == 'P' && buf[2] == 'N' && buf[3] == 'G' &&
+        buf[4] == 0x0D && buf[5] == 0x0A && buf[6] == 0x1A && buf[7] == 0x0A)
+        return true;
+
+    // JPEG: FF D8 FF
+    if (got >= 3 && buf[0] == 0xFF && buf[1] == 0xD8 && buf[2] == 0xFF)
+        return true;
+
+    // GIF: "GIF87a" or "GIF89a"
+    if (got >= 6 && buf[0] == 'G' && buf[1] == 'I' && buf[2] == 'F' &&
+        buf[3] == '8' && (buf[4] == '7' || buf[4] == '9') && buf[5] == 'a')
+        return true;
+
+    // BMP: 'B' 'M'
+    if (got >= 2 && buf[0] == 'B' && buf[1] == 'M')
+        return true;
+
+    // WebP: "RIFF"...."WEBP" (bytes 0..3 == 'R','I','F','F' and 8..11 == 'W','E','B','P')
+    if (got >= 12 &&
+        buf[0] == 'R' && buf[1] == 'I' && buf[2] == 'F' && buf[3] == 'F' &&
+        buf[8] == 'W' && buf[9] == 'E' && buf[10] == 'B' && buf[11] == 'P')
+        return true;
+
+    // Heuristic fallback: SVG / XML (starts with '<') — treat as image if it looks like an SVG tag.
+    if (buf[0] == '<')
+    {
+        // check for "<?xml" or "<svg"
+        const std::string s(reinterpret_cast<char*>(buf), static_cast<size_t>(got));
+        auto pos = s.find("svg");
+        if (pos != std::string::npos) return true;
+        pos = s.find("<?xml");
+        if (pos != std::string::npos) return true;
+    }
+
+    // NOTE: ICO support intentionally removed — do not accept ICO signature.
+
+    return false;
+}
+
+static void schedule_favicon_download_for_playback(
+    const std::string& utagPath,
+    const json& station)
+{
+    if (!favicon_download_enabled())
+        return;
+
+    const auto it = station.find("favicon");
+    if (it == station.end() || !it->is_string())
+        return;
+
+    const std::string url = it->get<std::string>();
+    if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0)
+        return;
+
+    try
+    {
+        // Use a native Windows path (strip "file://") before converting to wide.
+        const std::string nativeUtagPath = to_native_windows_path(utagPath);
+        const std::wstring widePath = utf8_to_wide(nativeUtagPath);
+
+        // Debug log to confirm scheduling reached (show native path).
+        UTAG_LOG("[foo_utag] schedule_favicon_download_for_playback: utag=%s favicon=%s",
+            nativeUtagPath.c_str(), url.c_str());
+
+        const size_t slash = widePath.find_last_of(L"\\/");
+        const size_t dot = widePath.find_last_of(L'.');
+        if (dot == std::wstring::npos ||
+            (slash != std::wstring::npos && dot < slash))
+            return;
+
+        // Preserve the original image extension from the favicon URL path.
+        // Ignore query/fragment strings (for example, icon.png?v=2). Accept only
+        // known image extensions; otherwise fall back to .png to avoid .ico.
+        std::wstring extension = L".png";
+        const size_t urlQuery = url.find_first_of("?#");
+        const std::string urlPath = url.substr(0, urlQuery);
+        const size_t urlDot = urlPath.find_last_of('.');
+        const size_t urlSlash = urlPath.find_last_of('/');
+        if (urlDot != std::string::npos &&
+            (urlSlash == std::string::npos || urlDot > urlSlash))
+        {
+            const std::string ext = urlPath.substr(urlDot); // includes leading dot
+            if (ext.size() >= 2 && ext.size() <= 12 && is_known_image_ext(ext))
+                extension = utf8_to_wide(ext);
+        }
+
+        const std::wstring imagePath = widePath.substr(0, dot) + extension;
+
+        // only skip when a file already exists at imagePath and it is not a directory.
+        const DWORD attrs = GetFileAttributesW(imagePath.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES &&
+            (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0)
+        {
+            UTAG_LOG("[foo_utag] favicon already exists, skipping download: %s",
+                pfc::stringcvt::string_utf8_from_wide(imagePath.c_str()).get_ptr());
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_faviconMutex);
+            if (!g_faviconInFlight.insert(imagePath).second)
+                return;
+        }
+
+        UTAG_LOG("[foo_utag] starting favicon download: %s -> %s",
+            url.c_str(), pfc::stringcvt::string_utf8_from_wide(imagePath.c_str()).get_ptr());
+
+        std::thread([url, imagePath]() {
+            HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            const std::wstring tempPath = imagePath + L".download.tmp";
+            try
+            {
+                // Another playback may have completed the same download meanwhile.
+                const DWORD existing = GetFileAttributesW(imagePath.c_str());
+                if (existing != INVALID_FILE_ATTRIBUTES &&
+                    (existing & FILE_ATTRIBUTE_DIRECTORY) == 0)
+                {
+                    std::lock_guard<std::mutex> lock(g_faviconMutex);
+                    g_faviconInFlight.erase(imagePath);
+                    if (SUCCEEDED(comResult)) CoUninitialize();
+                    return;
+                }
+
+                // Download to a temporary file so artwork readers never see a
+                // partially-written image.
+                DeleteFileW(tempPath.c_str());
+                const std::wstring wideUrl = utf8_to_wide(url);
+                const HRESULT hr = URLDownloadToFileW(
+                    nullptr, wideUrl.c_str(), tempPath.c_str(), 0, nullptr);
+
+                if (SUCCEEDED(hr))
+                {
+                    // Validate that the downloaded file actually looks like an image.
+                    if (!is_image_file_by_magic(tempPath))
+                    {
+                       UTAG_LOG("[foo_utag] downloaded file is not a recognized image, discarding: %s",
+                            pfc::stringcvt::string_utf8_from_wide(tempPath.c_str()).get_ptr());
+                        DeleteFileW(tempPath.c_str());
+                    }
+                    else if (!MoveFileExW(tempPath.c_str(), imagePath.c_str(),
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+                    {
+                       UTAG_LOG("[foo_utag] could not publish downloaded favicon (Win32 error %lu)",
+                            static_cast<unsigned long>(GetLastError()));
+                        DeleteFileW(tempPath.c_str());
+                    }
+                    else
+                    {
+                       UTAG_LOG("[foo_utag] saved favicon: %s",
+                            pfc::stringcvt::string_utf8_from_wide(imagePath.c_str()).get_ptr());
+                    }
+                }
+                else
+                {
+                   UTAG_LOG("[foo_utag] favicon download failed (HRESULT 0x%08X)",
+                        static_cast<unsigned>(hr));
+                    DeleteFileW(tempPath.c_str());
+                }
+            }
+            catch (...)
+            {
+                DeleteFileW(tempPath.c_str());
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(g_faviconMutex);
+                g_faviconInFlight.erase(imagePath);
+            }
+            if (SUCCEEDED(comResult)) CoUninitialize();
+            }).detach();
+    }
+    catch (...)
+    {
+        // Scheduling failure must never prevent station playback.
+    }
+}
+
 namespace
 {
     // Retagging reopens the track within a moment; anything later is a
@@ -498,7 +748,7 @@ public:
             handoff_enabled() &&
             !is_local_file_reference(m_url))
         {
-            console::formatter() << "[foo_utag] handing off decoder: @ = "
+            if (utag_console_logging_enabled()) console::formatter() << "[foo_utag] handing off decoder: @ = "
                 << m_url.c_str();
 
             handoff_store(m_url, m_decoder);
@@ -591,6 +841,11 @@ public:
         }
 
         m_url = urlIt->get<std::string>();
+
+        // Download optional station artwork only when this .utag is opened
+        // for actual playback, never during library scans or Properties reads.
+        if (m_reason == input_open_decode)
+            schedule_favicon_download_for_playback(m_path, m_json);
 
         // Prefer "name" for the station name.
         m_displayName = basename_from_path(m_path);
@@ -749,7 +1004,7 @@ public:
 
     static void log_utag_info(const char* stage, const char* url)
     {
-        console::printf(
+       UTAG_LOG(
             "[foo_utag] %s: @ = %s",
             stage,
             url != nullptr ? url : "(null)"
@@ -774,7 +1029,7 @@ public:
         {
             m_handedOff = true;
             m_reused = true;
-            console::printf("[foo_utag] reusing running stream: @ = %s", m_url.c_str());
+           UTAG_LOG("[foo_utag] reusing running stream: @ = %s", m_url.c_str());
             return;
         }
 
@@ -799,7 +1054,7 @@ public:
         }
         catch (const std::exception& e)
         {
-            console::printf("[foo_utag] open_for_decoding failed: %s", e.what());
+           UTAG_LOG("[foo_utag] open_for_decoding failed: %s", e.what());
             throw;
         }
 
@@ -853,7 +1108,7 @@ public:
             }
             catch (const std::exception& e)
             {
-                console::printf(
+               UTAG_LOG(
                     "[foo_utag] reused stream failed (%s), reconnecting",
                     e.what());
 
@@ -2862,6 +3117,41 @@ public:
                         (probed ? " (name from stream)" : "") +
                         "\n          @  : " + url +
                         "\n          -> " + outputPath);
+
+                    try
+                    {
+                        static_api_ptr_t<playlist_manager> playlists;
+                        const std::string playlistName = "New utags";
+
+                        // Make canonical path for the created file.
+                        pfc::string8 canonicalPath;
+                        filesystem::g_get_canonical_path(outputPath.c_str(), canonicalPath);
+
+                        pfc::list_t<const char*> locations;
+                        locations.add_item(canonicalPath.get_ptr());
+
+                        // find_or_create_playlist returns index or pfc_infinite on failure.
+                        const t_size plIndex = playlists->find_or_create_playlist(playlistName.c_str(), playlistName.length());
+                        if (plIndex != pfc_infinite)
+                        {
+                            playlists->playlist_add_locations(plIndex, locations, true, owner);
+                            playlists->set_active_playlist(plIndex);
+                        }
+                        else
+                        {
+                            // Fallback: try create_playlist if find_or_create failed.
+                            const t_size createdIndex = playlists->create_playlist(playlistName.c_str(), playlistName.length(), pfc_infinite);
+                            if (createdIndex != pfc_infinite)
+                            {
+                                playlists->playlist_add_locations(createdIndex, locations, true, owner);
+                                playlists->set_active_playlist(createdIndex);
+                            }
+                        }
+                    }
+                    catch (...)
+                    {
+                        // Don't treat playlist failures as fatal for utag creation.
+                    }
                 }
                 else
                 {
@@ -2918,101 +3208,128 @@ g_add_url_utag_mainmenu_factory;
 static contextmenu_item_factory_t<create_utag_context_menu>
 g_create_utag_context_menu_factory;
 
+// Extracts the saved favicon as front-cover artwork when available. Favicon
+// downloading is asynchronous, so an initial artwork query may happen before the
+// sidecar exists; later queries can use it. If it is not present, preserve the
+// referenced-file fallback. The built-in viewer may cache artwork and may need
+// its own refresh/track-change before it asks again.
+class utag_album_art_extractor_instance : public album_art_extractor_instance
+{
+public:
+    utag_album_art_extractor_instance(std::string imagePath, std::string reference)
+        : m_imagePath(std::move(imagePath)), m_reference(std::move(reference)) {
+    }
+
+    album_art_data_ptr query(const GUID& what, abort_callback& abort) override
+    {
+        abort.check();
+        if (what == album_art_ids::cover_front && !m_imagePath.empty())
+        {
+            try
+            {
+                service_ptr_t<file> imageFile;
+                filesystem::g_open_read(imageFile, m_imagePath.c_str(), abort);
+                const t_filesize size = imageFile->get_size_ex(abort);
+                if (size > 0 && size <= 64 * 1024 * 1024)
+                    return album_art_data_impl::g_create(
+                        imageFile.get_ptr(), pfc::downcast_guarded<t_size>(size), abort);
+            }
+            catch (const exception_io&)
+            {
+                // Fall back to the referenced media file if the sidecar is absent/unreadable.
+            }
+        }
+
+        auto fallback = album_art_extractor::g_open(nullptr, m_reference.c_str(), abort);
+        return fallback->query(what, abort);
+    }
+
+private:
+    std::string m_imagePath;
+    std::string m_reference;
+};
+
 class utag_album_art_extractor : public album_art_extractor_v2
 {
 public:
-    bool is_our_path(
-        const char* path,
-        const char* extension
-    ) override
+    bool is_our_path(const char* path, const char* extension) override
     {
         (void)path;
-
-        return extension != nullptr
-            && pfc::stricmp_ascii(extension, "utag") == 0;
+        return extension != nullptr && pfc::stricmp_ascii(extension, "utag") == 0;
     }
 
     album_art_extractor_instance_ptr open(
-        file_ptr fileHint,
-        const char* path,
-        abort_callback& abort
-    ) override
+        file_ptr fileHint, const char* path, abort_callback& abort) override
     {
         (void)fileHint;
+        if (path == nullptr || *path == '\0') throw exception_io_data();
 
-        if (path == nullptr || *path == '\0')
-            throw exception_io_data();
-
-        // Open the .utag file and read its JSON.
         service_ptr_t<file> file;
         filesystem::g_open_read(file, path, abort);
-
         const t_filesize size = file->get_size_ex(abort);
-
-        if (size == 0 || size > kMaxStubSize)
-            throw exception_io_data();
+        if (size == 0 || size > kMaxStubSize) throw exception_io_data();
 
         std::string buffer(static_cast<size_t>(size), '\0');
-
         file->seek(0, abort);
-        file->read_object(
-            buffer.data(),
-            static_cast<t_size>(buffer.size()),
-            abort
-        );
-
+        file->read_object(buffer.data(), static_cast<t_size>(buffer.size()), abort);
         file.release();
 
-        // Support a UTF-8 BOM.
         if (buffer.size() >= 3 &&
             static_cast<unsigned char>(buffer[0]) == 0xEF &&
             static_cast<unsigned char>(buffer[1]) == 0xBB &&
             static_cast<unsigned char>(buffer[2]) == 0xBF)
-        {
             buffer.erase(0, 3);
-        }
 
-        // Expected format: [ { "@": "reference path", ... } ]
         json parsed = json::parse(buffer, nullptr, false);
-
-        if (parsed.is_discarded() ||
-            !parsed.is_array() ||
-            parsed.size() != 1 ||
-            !parsed[0].is_object())
-        {
+        if (parsed.is_discarded() || !parsed.is_array() ||
+            parsed.size() != 1 || !parsed[0].is_object())
             throw exception_io_data();
-        }
 
-        const auto it = parsed[0].find("@");
-
-        if (it == parsed[0].end() ||
-            !it->is_string() ||
-            it->get<std::string>().empty())
-        {
+        const auto refIt = parsed[0].find("@");
+        if (refIt == parsed[0].end() || !refIt->is_string() ||
+            refIt->get<std::string>().empty())
             throw exception_album_art_not_found();
-        }
 
-        // Convert the existing file://C:\... representation
-        // into a native Windows path before asking foobar2000
-        // to open the referenced file's artwork extractor.
-        const std::string reference =
-            to_native_windows_path(it->get<std::string>());
+        const std::string reference = to_native_windows_path(refIt->get<std::string>());
+        std::string imagePath;
+        const auto faviconIt = parsed[0].find("favicon");
+        if (faviconIt != parsed[0].end() && faviconIt->is_string())
+        {
+            const std::string url = faviconIt->get<std::string>();
+            if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0)
+            {
+                std::string extension = ".ico";
+                const size_t query = url.find_first_of("?#");
+                const std::string urlPath = url.substr(0, query);
+                const size_t dot = urlPath.find_last_of('.');
+                const size_t slash = urlPath.find_last_of('/');
+                if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+                {
+                    const std::string candidate = urlPath.substr(dot);
+                    if (candidate.size() <= 6) extension = candidate;
+                }
+
+                std::string nativePath = to_native_windows_path(path);
+                const size_t pathSlash = nativePath.find_last_of("\\/");
+                const size_t pathDot = nativePath.find_last_of('.');
+                if (pathDot != std::string::npos &&
+                    (pathSlash == std::string::npos || pathDot > pathSlash))
+                {
+                    imagePath = nativePath.substr(0, pathDot) + extension;
+                    const std::wstring wideImage = utf8_to_wide(imagePath);
+                    const DWORD attrs = GetFileAttributesW(wideImage.c_str());
+                    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY))
+                        imagePath.clear();
+                }
+            }
+        }
 
         abort.check();
-
-        // Delegate artwork reading to the referenced file type.
-        // No artwork editor is registered for .utag.
-        return album_art_extractor::g_open(
-            nullptr,
-            reference.c_str(),
-            abort
-        );
+        return new service_impl_t<utag_album_art_extractor_instance>(
+            std::move(imagePath), reference);
     }
 
-    GUID get_guid() override
-    {
-        return g_utag_guid;
-    }
+    GUID get_guid() override { return g_utag_guid; }
 };
 
 static service_factory_single_t<utag_album_art_extractor>
