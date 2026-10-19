@@ -11,10 +11,11 @@ The `.utag` file stores the stream URL and metadata. foobar2000 can scan and tag
 - **Stream URL in Properties:** the URL is exposed in the information section as `@` and can be displayed with `%__@%`.
 - **Create files from a playlist:** use **Tagging → Create utag files...** in the playlist context menu to create one `.utag` file for each selected track.
 - **Default folder:** **Tagging → Set default utag folder...** saves an output folder, and **Tagging → Create utag files in default folder** creates the files there without asking.
-- **Add a station by URL:** **File → Add internet radio url and create utag** asks for a stream URL (and an optional name) and creates the `.utag` file in the default folder. If no name is entered, it is looked up from the stream.
+- **Add a station by URL:** **File → Add internet radio url and create utag** asks for a stream URL (and an optional name) and creates the `.utag` file in the default folder. If no name is entered, it is looked up from the stream. Track is sent to the "New utags" playlist.
 - **Import from Radio Browser:** **File → Import stations from Radio Browser...** downloads stations from the [Radio Browser](https://www.radio-browser.info/) directory and creates one `.utag` file per station, in a new folder named after the search.																																																														
 - **Results popup:** every created or skipped entry lists the stream URL (`@`) and the output path; errors list the source URL and the reason.
 - **Optional stream handoff:** an Advanced preference can reuse the running decoder when the playing item is reopened after retagging, helping avoid a reconnect and audible pause.
+- **Optional favicon download during playback:** an Advanced preference Optional favicon download during playback, using the favicon URL stored in the .utag JSON.
 
 ## `.utag` file format
 
@@ -132,6 +133,18 @@ It is located under **Preferences → Advanced → Tools** and is enabled by def
 When enabled, the component temporarily retains the current decoder when an input instance closes during playback. If a new instance for the same stream URL opens within approximately two seconds, it can take over the existing decoder rather than opening a new stream connection. If the decoder is not reused within the handoff window, it is released shortly afterward.
 
 This behavior is intended to reduce reconnects and audible pauses when retagging the currently playing item. Disable the preference if you prefer every reopened input to use a fresh decoder connection.
+
+## favicon download during playback
+
+The component provides this Advanced preference:
+
+**utag: download favicon image during playback**
+
+Optional favicon download during playback, using the favicon URL stored in the .utag JSON.
+Downloads run asynchronously and should not block playback initialization.
+The image is saved beside the .utag file using the same base filename and the extension inferred from the favicon URL.
+Existing images are skipped, and downloads use a temporary file before publishing the completed image.
+The built-in Album Art Viewer may cache artwork and might not refresh automatically when the download completes.
 
 ## Technical notes and limitations
 
