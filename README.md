@@ -116,6 +116,9 @@ If the name field is empty, the component connects to the stream briefly and rea
 
 Files are never overwritten; duplicate names receive a numeric suffix such as `Station (2).utag`. 
 
+Track is sent to the "New utags" playlist.
+
+
 ## Editing tags
 
 The component supports writing updated metadata back to the `.utag` file. The stream URL field `@` is reserved and is not written as a normal tag.
@@ -141,9 +144,13 @@ The component provides this Advanced preference:
 **utag: download favicon image during playback**
 
 Optional favicon download during playback, using the favicon URL stored in the .utag JSON.
+
 Downloads run asynchronously and should not block playback initialization.
+
 The image is saved beside the .utag file using the same base filename and the extension inferred from the favicon URL.
+
 Existing images are skipped, and downloads use a temporary file before publishing the completed image.
+
 The built-in Album Art Viewer may cache artwork and might not refresh automatically when the download completes.
 
 ## Technical notes and limitations
