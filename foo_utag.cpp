@@ -32,7 +32,7 @@ using json = nlohmann::json;
 
 DECLARE_COMPONENT_VERSION(
     "utag Input",
-    "1.0.5",
+    "1.0.6",
     "Adds internet radio streams and other remote URLs to the Media Library.\n"
     "\n"
     "Each .utag file is a small JSON stub that stores a stream URL (\"@\") together\n"
@@ -514,26 +514,26 @@ static void schedule_favicon_download_for_playback(
                     // Validate that the downloaded file actually looks like an image.
                     if (!is_image_file_by_magic(tempPath))
                     {
-                       UTAG_LOG("[foo_utag] downloaded file is not a recognized image, discarding: %s",
+                        UTAG_LOG("[foo_utag] downloaded file is not a recognized image, discarding: %s",
                             pfc::stringcvt::string_utf8_from_wide(tempPath.c_str()).get_ptr());
                         DeleteFileW(tempPath.c_str());
                     }
                     else if (!MoveFileExW(tempPath.c_str(), imagePath.c_str(),
                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
                     {
-                       UTAG_LOG("[foo_utag] could not publish downloaded favicon (Win32 error %lu)",
+                        UTAG_LOG("[foo_utag] could not publish downloaded favicon (Win32 error %lu)",
                             static_cast<unsigned long>(GetLastError()));
                         DeleteFileW(tempPath.c_str());
                     }
                     else
                     {
-                       UTAG_LOG("[foo_utag] saved favicon: %s",
+                        UTAG_LOG("[foo_utag] saved favicon: %s",
                             pfc::stringcvt::string_utf8_from_wide(imagePath.c_str()).get_ptr());
                     }
                 }
                 else
                 {
-                   UTAG_LOG("[foo_utag] favicon download failed (HRESULT 0x%08X)",
+                    UTAG_LOG("[foo_utag] favicon download failed (HRESULT 0x%08X)",
                         static_cast<unsigned>(hr));
                     DeleteFileW(tempPath.c_str());
                 }
@@ -1004,7 +1004,7 @@ public:
 
     static void log_utag_info(const char* stage, const char* url)
     {
-       UTAG_LOG(
+        UTAG_LOG(
             "[foo_utag] %s: @ = %s",
             stage,
             url != nullptr ? url : "(null)"
@@ -1029,7 +1029,7 @@ public:
         {
             m_handedOff = true;
             m_reused = true;
-           UTAG_LOG("[foo_utag] reusing running stream: @ = %s", m_url.c_str());
+            UTAG_LOG("[foo_utag] reusing running stream: @ = %s", m_url.c_str());
             return;
         }
 
@@ -1054,7 +1054,7 @@ public:
         }
         catch (const std::exception& e)
         {
-           UTAG_LOG("[foo_utag] open_for_decoding failed: %s", e.what());
+            UTAG_LOG("[foo_utag] open_for_decoding failed: %s", e.what());
             throw;
         }
 
@@ -1108,7 +1108,7 @@ public:
             }
             catch (const std::exception& e)
             {
-               UTAG_LOG(
+                UTAG_LOG(
                     "[foo_utag] reused stream failed (%s), reconnecting",
                     e.what());
 
@@ -3213,6 +3213,16 @@ g_create_utag_context_menu_factory;
 // sidecar exists; later queries can use it. If it is not present, preserve the
 // referenced-file fallback. The built-in viewer may cache artwork and may need
 // its own refresh/track-change before it asks again.
+// True for plain paths and file:// references. Remote streams (http, https,
+// etc.) have no length and no embedded artwork, so artwork readers must not
+// be pointed at them (doing so throws "Length of object is unknown").
+static bool utag_is_local_reference(const std::string& ref)
+{
+    if (ref.empty()) return false;
+    if (ref.rfind("file://", 0) == 0) return true;
+    return ref.find("://") == std::string::npos;
+}
+
 class utag_album_art_extractor_instance : public album_art_extractor_instance
 {
 public:
@@ -3240,8 +3250,25 @@ public:
             }
         }
 
-        auto fallback = album_art_extractor::g_open(nullptr, m_reference.c_str(), abort);
-        return fallback->query(what, abort);
+        // Only local references can hold embedded artwork.
+        if (!utag_is_local_reference(m_reference))
+            throw exception_album_art_not_found();
+
+        try
+        {
+            auto fallback = album_art_extractor::g_open(nullptr, m_reference.c_str(), abort);
+            return fallback->query(what, abort);
+        }
+        catch (const exception_album_art_not_found&)
+        {
+            throw;
+        }
+        catch (const exception_io&)
+        {
+            // Unreadable/unsized referenced item: report "no artwork" rather
+            // than an unexpected error in the artwork viewer.
+            throw exception_album_art_not_found();
+        }
     }
 
 private:
@@ -3419,10 +3446,20 @@ public:
 
         abort.check();
 
+        // Remote streams have no length and cannot hold editable artwork.
+        if (!utag_is_local_reference(reference)) {
+            throw exception_io_data();
+        }
+
         // Delegate to the registered editor for the actual audio format.
         // This may throw if that format has no artwork editor.
-        return album_art_editor::g_open(
-            nullptr, reference.c_str(), abort);
+        try {
+            return album_art_editor::g_open(
+                nullptr, reference.c_str(), abort);
+        }
+        catch (const exception_io&) {
+            throw exception_io_data();
+        }
     }
 
     GUID get_guid() override
