@@ -1,4 +1,4 @@
-#include <SDK/foobar2000.h>
+ï»¿#include <SDK/foobar2000.h>
 #include <SDK/coreDarkMode.h>
 #include <nlohmann/json.hpp>
 
@@ -402,7 +402,7 @@ static bool is_image_file_by_magic(const std::wstring& path)
         buf[8] == 'W' && buf[9] == 'E' && buf[10] == 'B' && buf[11] == 'P')
         return true;
 
-    // Heuristic fallback: SVG / XML (starts with '<') — treat as image if it looks like an SVG tag.
+    // Heuristic fallback: SVG / XML (starts with '<') ï¿½ treat as image if it looks like an SVG tag.
     if (buf[0] == '<')
     {
         // check for "<?xml" or "<svg"
@@ -413,11 +413,41 @@ static bool is_image_file_by_magic(const std::wstring& path)
         if (pos != std::string::npos) return true;
     }
 
-    // NOTE: ICO support intentionally removed — do not accept ICO signature.
+    // NOTE: ICO support intentionally removed ï¿½ do not accept ICO signature.
 
     return false;
 }
 
+
+// Ask foobar2000 to refresh the .utag metadata after its favicon sidecar
+// has been successfully published. This gives artwork viewers a chance to
+// query the extractor again; it is intentionally never called on download failure.
+static void notify_utag_artwork_changed(const std::string& utagPath)
+{
+    try
+    {
+        metadb_handle_ptr handle = metadb::get()->handle_create(utagPath.c_str(), 0);
+        file_info_impl info;
+        if (!handle->get_info(info))
+            return;
+
+        const t_filestats stats = handle->get_filestats();
+        fb2k::inMainThread([handle, info, stats]() {
+            try
+            {
+                auto hints = metadb_hint_list_v3::create();
+                hints->add_hint_forced(handle, info, stats, true);
+                hints->on_done();
+            }
+            catch (...)
+            {
+            }
+            });
+    }
+    catch (...)
+    {
+    }
+}
 static void schedule_favicon_download_for_playback(
     const std::string& utagPath,
     const json& station)
@@ -438,10 +468,6 @@ static void schedule_favicon_download_for_playback(
         // Use a native Windows path (strip "file://") before converting to wide.
         const std::string nativeUtagPath = to_native_windows_path(utagPath);
         const std::wstring widePath = utf8_to_wide(nativeUtagPath);
-
-        // Debug log to confirm scheduling reached (show native path).
-        UTAG_LOG("[foo_utag] schedule_favicon_download_for_playback: utag=%s favicon=%s",
-            nativeUtagPath.c_str(), url.c_str());
 
         const size_t slash = widePath.find_last_of(L"\\/");
         const size_t dot = widePath.find_last_of(L'.');
@@ -486,7 +512,7 @@ static void schedule_favicon_download_for_playback(
         UTAG_LOG("[foo_utag] starting favicon download: %s -> %s",
             url.c_str(), pfc::stringcvt::string_utf8_from_wide(imagePath.c_str()).get_ptr());
 
-        std::thread([url, imagePath]() {
+        std::thread([url, imagePath, utagPath]() {
             HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
             const std::wstring tempPath = imagePath + L".download.tmp";
             try
@@ -529,6 +555,8 @@ static void schedule_favicon_download_for_playback(
                     {
                         UTAG_LOG("[foo_utag] saved favicon: %s",
                             pfc::stringcvt::string_utf8_from_wide(imagePath.c_str()).get_ptr());
+                        notify_utag_artwork_changed(utagPath);
+
                     }
                 }
                 else
@@ -694,10 +722,102 @@ namespace
         std::lock_guard<std::mutex> lock(g_techMutex);
 
         if (!g_techValid || g_techUrl != url)
+        {
             return false;
+        }
 
         dst.copy_info(g_techInfo);
         return true;
+    }
+
+    // Apply playback-discovered technical info to foobar2000's metadata DB.
+    // Properties reads the metadb snapshot; changing our private cache alone
+    // does not update that snapshot. The forced hint is committed on main thread.
+    class tech_info_metadb_hint_callback : public main_thread_callback
+    {
+    public:
+        tech_info_metadb_hint_callback(
+            metadb_handle_ptr handle, const file_info& info, const t_filestats& stats)
+            : m_handle(std::move(handle)), m_stats(stats)
+        {
+            m_info.copy(info);
+        }
+
+        void callback_run() override
+        {
+            try
+            {
+                auto hints = metadb_hint_list_v3::create();
+                hints->add_hint_forced(m_handle, m_info, m_stats, true);
+                hints->on_done();
+            }
+            catch (const std::exception&)
+            {
+            }
+        }
+
+    private:
+        metadb_handle_ptr m_handle;
+        file_info_impl m_info;
+        t_filestats m_stats;
+    };
+
+    void tech_refresh_metadb(const std::string& path, const file_info& decoderInfo)
+    {
+        try
+        {
+            metadb_handle_ptr handle = metadb::get()->handle_create(path.c_str(), 0);
+            file_info_impl mergedInfo;
+            if (!handle->get_info(mergedInfo))
+            {
+                return;
+            }
+
+            // Don't dispatch a database update if technical info is already current.
+            if (file_info::g_is_info_equal(mergedInfo, decoderInfo))
+                return;
+
+            // Preserve the reserved stream URL before replacing technical info.
+            // copy_info() replaces the complete technical-info section, so without
+            // restoring "@" the Properties snapshot loses the URL on playback.
+            const char* reservedUrlPtr = mergedInfo.info_get("@");
+            const std::string reservedUrl =
+                reservedUrlPtr != nullptr ? reservedUrlPtr : std::string();
+
+            // Metadata tags and ReplayGain are separate from the technical-info
+            // section and remain intact; restore "@" explicitly after the copy.
+            mergedInfo.copy_info(decoderInfo);
+            if (!reservedUrl.empty())
+                mergedInfo.info_set("@", reservedUrl.c_str());
+
+            const t_filestats stats = handle->get_filestats();
+            fb2k::inMainThread([handle, mergedInfo, stats]() {
+                try
+                {
+                    auto hints = metadb_hint_list_v3::create();
+                    hints->add_hint_forced(handle, mergedInfo, stats, true);
+                    hints->on_done();
+                }
+                catch (const std::exception&)
+                {
+                }
+                });
+        }
+        catch (const std::exception&)
+        {
+        }
+    }
+
+    void tech_clear(const std::string& url)
+    {
+        std::lock_guard<std::mutex> lock(g_techMutex);
+
+        if (g_techValid && g_techUrl == url)
+        {
+            g_techInfo.reset();
+            g_techUrl.clear();
+            g_techValid = false;
+        }
     }
 }
 
@@ -954,11 +1074,17 @@ public:
             }
         }
 
-        // Technical info (codec, bitrate, ...) only during playback, taken from
-        // the decoder that playback uses anyway. Library scans / Properties
-        // (input_open_info_read) never touch the network.
+        // The incoming file_info can already contain technical details from an
+        // earlier Properties/library snapshot. Always clear that section first;
+        // otherwise a cache miss leaves those stale fields visible.
+        info.info_remove_all();
+
+        // Technical info (codec, bitrate, ...) during playback must come only
+        // from the decoder opened for this playback attempt.
         if (m_reason == input_open_decode)
         {
+            tech_clear(m_url);
+
             try
             {
                 ensure_decoder(abort);
@@ -968,19 +1094,15 @@ public:
 
                 if (decoderInfo.info_get("codec") != nullptr)
                 {
-                    // copy_info() replaces the whole info section.
                     info.copy_info(decoderInfo);
                     tech_store(m_url, decoderInfo);
                 }
-                else
-                {
-                    // e.g. a handed-off decoder reporting no codec
-                    tech_load(m_url, info);
-                }
+                // If the current decoder reports no codec, leave technical
+                // info empty; never retain or restore an earlier snapshot.
             }
             catch (const exception_io&)
             {
-                tech_load(m_url, info);
+                // Leave technical fields unset rather than restoring stale data.
             }
         }
         else
@@ -1019,6 +1141,11 @@ public:
     {
         if (m_decoder.is_valid())
             return;
+
+        // A new playback-open attempt must not inherit technical details from
+        // an earlier connection that happened to use the same URL.
+        if (m_reason == input_open_decode)
+            tech_clear(m_url);
 
         // Reuse the running decoder of the instance that was
         // just closed (e.g. because the playing item was retagged).
@@ -1062,6 +1189,36 @@ public:
             throw exception_io_data();
     }
 
+    // Refresh the URL's cached technical info from the decoder already in use.
+    // This is best-effort: metadata refresh must not prevent playback.
+    void refresh_technical_info_cache(abort_callback& abort)
+    {
+        if (!m_decoder.is_valid())
+            return;
+
+        try
+        {
+            file_info_impl decoderInfo;
+            m_decoder->get_info(0, decoderInfo, abort);
+
+            if (decoderInfo.info_get("codec") != nullptr)
+            {
+                tech_store(m_url, decoderInfo);
+                tech_refresh_metadb(m_path, decoderInfo);
+            }
+            else
+            {
+            }
+        }
+        catch (const exception_aborted&)
+        {
+            throw;
+        }
+        catch (const std::exception&)
+        {
+        }
+    }
+
     void decode_initialize(unsigned flags, abort_callback& abort)
     {
         // Reuses the decoder get_info() already opened during playback,
@@ -1077,12 +1234,17 @@ public:
         {
             m_handedOff = false;
             m_initialized = true;
+            refresh_technical_info_cache(abort);
             return;
         }
 
         // Forward the caller's flags (playback, no_seeking, no_looping, ...)
         m_decoder->initialize(0, flags, abort);
         m_initialized = true;
+
+        // Some decoders expose more complete format details after initialize.
+        // Refresh the cache without opening another connection.
+        refresh_technical_info_cache(abort);
     }
 
     bool decode_run(audio_chunk& chunk, abort_callback& abort)
@@ -1176,6 +1338,13 @@ public:
 
         json updated = m_json;
 
+        // The "@" field is a reserved URL key, not an editable metadata tag.
+        // Preserve its original value regardless of what file_info contains.
+        const auto reservedUrlIt = m_json.find("@");
+        const json reservedUrl = reservedUrlIt != m_json.end()
+            ? *reservedUrlIt
+            : json(m_url);
+
         // Remove old standard tags regardless of key capitalization.
         for (auto it = updated.begin(); it != updated.end();)
         {
@@ -1246,6 +1415,10 @@ public:
         if (replayGain.format_album_peak(buffer))
             updated["replaygain_album_peak"] = buffer;
 
+        // Restore the reserved URL after all metadata edits; Properties must
+        // never overwrite it.
+        updated["@"] = reservedUrl;
+
         commit_json(std::move(updated), abort);
     }
 
@@ -1255,6 +1428,10 @@ public:
             throw exception_tagging_unsupported();
 
         json updated = m_json;
+        const auto reservedUrlIt = m_json.find("@");
+        const json reservedUrl = reservedUrlIt != m_json.end()
+            ? *reservedUrlIt
+            : json(m_url);
 
         for (auto it = updated.begin(); it != updated.end();)
         {
@@ -1263,6 +1440,8 @@ public:
             else
                 ++it;
         }
+
+        updated["@"] = reservedUrl;
 
         commit_json(std::move(updated), abort);
     }

@@ -5,3 +5,4 @@
 .gitattributes
 foo_utag.sln
 foo_utag.vcxproj*
+/bk
