@@ -2737,6 +2737,11 @@ namespace
     constexpr int kIdRbBitrate = 1104;
     constexpr int kIdRbLimit = 1105;
     constexpr int kIdRbStatus = 1106;
+    constexpr WORD kIdRbShowTags = 2106;
+    constexpr WORD kIdRbTagFilter = 2107;
+    constexpr WORD kIdRbTagList = 2108;
+    constexpr WORD kIdRbShowCountries = 2109;
+
 
     constexpr size_t kRbMaxDetailedEntries = 60; // results popup stays readable
 
@@ -2776,6 +2781,10 @@ namespace
         return true;
     }
 
+    bool choose_radio_browser_tag(HWND owner, std::string& selected);
+    bool choose_radio_browser_country(HWND owner, std::string& selected);
+
+
     INT_PTR CALLBACK radio_prompt_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     {
         auto* state = reinterpret_cast<radio_prompt_state*>(
@@ -2787,6 +2796,7 @@ namespace
         {
             state = reinterpret_cast<radio_prompt_state*>(lp);
             SetWindowLongPtrW(dlg, DWLP_USER, lp);
+
             if (state->scope.can_create())
                 state->scope.initialize(dlg);
 
@@ -2806,11 +2816,52 @@ namespace
                 return TRUE;
             }
 
+            // NEW: Show all Radio Browser tags.
+            if (id == kIdRbShowTags && HIWORD(wp) == BN_CLICKED)
+            {
+                if (state != nullptr)
+                {
+                    std::string selected;
+
+                    if (choose_radio_browser_tag(dlg, selected))
+                    {
+                        const std::wstring wideTag = utf8_to_wide(selected);
+
+                        SetDlgItemTextW(
+                            dlg, kIdRbTag, wideTag.c_str());
+                    }
+                }
+
+                return TRUE;
+            }
+
+            // Show all Radio Browser country codes.
+            if (id == kIdRbShowCountries && HIWORD(wp) == BN_CLICKED)
+            {
+                if (state != nullptr)
+                {
+                    std::string selected;
+
+                    if (choose_radio_browser_country(dlg, selected))
+                    {
+                        const std::wstring wideCode = utf8_to_wide(selected);
+
+                        SetDlgItemTextW(
+                            dlg, kIdRbCountry, wideCode.c_str());
+                    }
+                }
+
+                return TRUE;
+            }
+
             if (id == IDOK && state != nullptr)
             {
-                const std::wstring country = trim_wide(read_dialog_text(dlg, kIdRbCountry));
+                const std::wstring country =
+                    trim_wide(read_dialog_text(dlg, kIdRbCountry));
+
                 if (!country.empty() &&
-                    (country.size() != 2 || !is_ascii_letter(country[0]) ||
+                    (country.size() != 2 ||
+                        !is_ascii_letter(country[0]) ||
                         !is_ascii_letter(country[1])))
                 {
                     SetDlgItemTextW(dlg, kIdRbStatus,
@@ -2820,8 +2871,11 @@ namespace
                 }
 
                 long minBitrate = 0;
-                const std::wstring bitrateText = trim_wide(read_dialog_text(dlg, kIdRbBitrate));
-                if (!bitrateText.empty() && !parse_whole_number(bitrateText, minBitrate))
+                const std::wstring bitrateText =
+                    trim_wide(read_dialog_text(dlg, kIdRbBitrate));
+
+                if (!bitrateText.empty() &&
+                    !parse_whole_number(bitrateText, minBitrate))
                 {
                     SetDlgItemTextW(dlg, kIdRbStatus,
                         L"Minimum bitrate must be a whole number.");
@@ -2830,9 +2884,12 @@ namespace
                 }
 
                 long limit = 100;
-                const std::wstring limitText = trim_wide(read_dialog_text(dlg, kIdRbLimit));
+                const std::wstring limitText =
+                    trim_wide(read_dialog_text(dlg, kIdRbLimit));
+
                 if (!limitText.empty() &&
-                    (!parse_whole_number(limitText, limit) || limit < 1 || limit > 5000))
+                    (!parse_whole_number(limitText, limit) ||
+                        limit < 1 || limit > 5000))
                 {
                     SetDlgItemTextW(dlg, kIdRbStatus,
                         L"Maximum stations must be between 1 and 5000.");
@@ -2840,11 +2897,18 @@ namespace
                     return TRUE;
                 }
 
-                state->query.name = wide_to_utf8(trim_wide(read_dialog_text(dlg, kIdRbName)));
-                state->query.tag = wide_to_utf8(trim_wide(read_dialog_text(dlg, kIdRbTag)));
+                state->query.name =
+                    wide_to_utf8(trim_wide(
+                        read_dialog_text(dlg, kIdRbName)));
+
+                state->query.tag =
+                    wide_to_utf8(trim_wide(
+                        read_dialog_text(dlg, kIdRbTag)));
+
                 state->query.countryCode = wide_to_utf8(country);
                 state->query.minBitrate = minBitrate;
                 state->query.limit = limit;
+
                 EndDialog(dlg, IDOK);
                 return TRUE;
             }
@@ -2859,33 +2923,85 @@ namespace
         return FALSE;
     }
 
+
     bool prompt_for_radio_query(HWND owner, radio_query& query)
     {
-        constexpr WORD kButton = 0x0080, kEdit = 0x0081, kStatic = 0x0082;
-        constexpr DWORD kEditStyle = ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP;
+        constexpr WORD kButton = 0x0080;
+        constexpr WORD kEdit = 0x0081;
+        constexpr WORD kStatic = 0x0082;
+
+        constexpr DWORD kEditStyle =
+            ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP;
 
         dialog_template t;
-        t.begin(WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER,
-            0, 0, 260, 142, L"Import stations from Radio Browser", L"Segoe UI", 9);
 
-        t.item(kStatic, SS_LEFT, 8, 12, 100, 10, 0xFFFF, L"Name contains:");
-        t.item(kEdit, kEditStyle, 112, 10, 140, 13, kIdRbName, L"");
-        t.item(kStatic, SS_LEFT, 8, 30, 100, 10, 0xFFFF, L"Tag / genre:");
-        t.item(kEdit, kEditStyle, 112, 28, 140, 13, kIdRbTag, L"");
-        t.item(kStatic, SS_LEFT, 8, 48, 100, 10, 0xFFFF, L"Country code (e.g. DE):");
-        t.item(kEdit, kEditStyle, 112, 46, 140, 13, kIdRbCountry, L"");
-        t.item(kStatic, SS_LEFT, 8, 66, 100, 10, 0xFFFF, L"Min. bitrate (kbps):");
-        t.item(kEdit, kEditStyle | ES_NUMBER, 112, 64, 140, 13, kIdRbBitrate, L"");
-        t.item(kStatic, SS_LEFT, 8, 84, 100, 10, 0xFFFF, L"Maximum stations:");
-        t.item(kEdit, kEditStyle | ES_NUMBER, 112, 82, 140, 13, kIdRbLimit, L"100");
-        t.item(kStatic, SS_LEFT, 8, 103, 244, 10, kIdRbStatus, L"");
-        t.item(kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 148, 120, 50, 14, IDOK, L"Import");
-        t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 202, 120, 50, 14, IDCANCEL, L"Cancel");
+        t.begin(
+            WS_POPUP | WS_CAPTION | WS_SYSMENU |
+            DS_MODALFRAME | DS_CENTER,
+            0, 0, 300, 142,
+            L"Import stations from Radio Browser",
+            L"Segoe UI", 8);
+
+        t.item(kStatic, SS_LEFT,
+            8, 12, 78, 10, 0xFFFF,
+            L"Name contains:");
+
+        t.item(kEdit, kEditStyle,
+            90, 10, 202, 13, kIdRbName, L"");
+
+        t.item(kStatic, SS_LEFT,
+            8, 30, 78, 10, 0xFFFF,
+            L"Tag / genre:");
+
+        t.item(kEdit, kEditStyle,
+            90, 28, 126, 13, kIdRbTag, L"");
+
+        t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP,
+            220, 28, 72, 14, kIdRbShowTags,
+            L"Show all tags");
+
+        t.item(kStatic, SS_LEFT,
+            8, 48, 78, 10, 0xFFFF,
+            L"Country code:");
+
+        t.item(kEdit, kEditStyle,
+            90, 46, 126, 13, kIdRbCountry, L"");
+
+        t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP,
+            220, 46, 72, 14, kIdRbShowCountries,
+            L"Show all codes");
+
+        t.item(kStatic, SS_LEFT,
+            8, 66, 78, 10, 0xFFFF,
+            L"Min. bitrate:");
+
+        t.item(kEdit, kEditStyle | ES_NUMBER,
+            90, 64, 202, 13, kIdRbBitrate, L"");
+
+        t.item(kStatic, SS_LEFT,
+            8, 84, 78, 10, 0xFFFF,
+            L"Max stations:");
+
+        t.item(kEdit, kEditStyle | ES_NUMBER,
+            90, 82, 202, 13, kIdRbLimit, L"100");
+
+        t.item(kStatic, SS_LEFT,
+            8, 103, 284, 10, kIdRbStatus, L"");
+
+        t.item(kButton, BS_DEFPUSHBUTTON | WS_TABSTOP,
+            180, 120, 52, 14, IDOK, L"Import");
+
+        t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP,
+            240, 120, 52, 14, IDCANCEL, L"Cancel");
 
         radio_prompt_state state;
+
         const INT_PTR result = DialogBoxIndirectParamW(
-            core_api::get_my_instance(), t.data(), owner,
-            radio_prompt_proc, reinterpret_cast<LPARAM>(&state));
+            core_api::get_my_instance(),
+            t.data(),
+            owner,
+            radio_prompt_proc,
+            reinterpret_cast<LPARAM>(&state));
 
         if (result != IDOK)
             return false;
@@ -3041,6 +3157,421 @@ namespace
         if (it == object.end() || !it->is_string())
             return {};
         return trim_text(it->get<std::string>());
+    }
+
+    // Reads the "stationcount" member (number or numeric string); 0 if absent.
+    static unsigned long long radio_json_count(const json& item)
+    {
+        const auto count = item.find("stationcount");
+        if (count == item.end())
+            return 0;
+
+        try
+        {
+            if (count->is_number_unsigned())
+                return count->get<unsigned long long>();
+
+            if (count->is_number_integer())
+            {
+                const auto n = count->get<long long>();
+                return n > 0 ? static_cast<unsigned long long>(n) : 0;
+            }
+
+            if (count->is_string())
+                return std::stoull(count->get<std::string>());
+        }
+        catch (...)
+        {
+        }
+
+        return 0;
+    }
+
+    // Used by both pickers. `name` is the value returned to the dialog (a tag
+    // or a country code); `title` is optional extra text (the country name)
+    // that is shown and searched too.
+    struct radio_tag_item
+    {
+        std::string name;
+        std::string title;
+        unsigned long long stationCount = 0;
+    };
+
+    struct radio_tag_picker_state
+    {
+        std::vector<radio_tag_item> tags;
+        std::vector<size_t> visible;
+        std::string selected;
+        fb2k::CCoreDarkModeHooks darkHooks;
+    };
+
+    static std::string radio_tag_lower(std::string text)
+    {
+        std::transform(text.begin(), text.end(), text.begin(),
+            [](unsigned char c)
+            {
+                return static_cast<char>(std::tolower(c));
+            });
+
+        return text;
+    }
+
+    static void rebuild_radio_tag_list(
+        HWND dlg, radio_tag_picker_state* state)
+    {
+        if (!state)
+            return;
+
+        const std::string filter = radio_tag_lower(trim_text(
+            wide_to_utf8(read_dialog_text(dlg, kIdRbTagFilter))));
+
+        SendDlgItemMessageW(dlg, kIdRbTagList, LB_RESETCONTENT, 0, 0);
+        state->visible.clear();
+
+        for (size_t i = 0; i < state->tags.size(); ++i)
+        {
+            const auto& tag = state->tags[i];
+
+            if (!filter.empty() &&
+                radio_tag_lower(tag.name).find(filter) == std::string::npos &&
+                radio_tag_lower(tag.title).find(filter) == std::string::npos)
+                continue;
+
+            const std::string label =
+                (tag.title.empty()
+                    ? tag.name
+                    : tag.title + " [" + tag.name + "]") +
+                " (" + std::to_string(tag.stationCount) + " stations)";
+
+            const std::wstring wideLabel = utf8_to_wide(label);
+
+            SendDlgItemMessageW(
+                dlg, kIdRbTagList, LB_ADDSTRING, 0,
+                reinterpret_cast<LPARAM>(wideLabel.c_str()));
+
+            state->visible.push_back(i);
+        }
+
+        if (!state->visible.empty())
+            SendDlgItemMessageW(dlg, kIdRbTagList, LB_SETCURSEL, 0, 0);
+    }
+
+    static INT_PTR CALLBACK radio_tag_picker_proc(
+        HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+    {
+        auto* state = reinterpret_cast<radio_tag_picker_state*>(
+            GetWindowLongPtrW(dlg, DWLP_USER));
+
+        switch (msg)
+        {
+        case WM_INITDIALOG:
+        {
+            state = reinterpret_cast<radio_tag_picker_state*>(lp);
+            SetWindowLongPtrW(dlg, DWLP_USER, lp);
+
+            if (state != nullptr)
+            {
+                state->darkHooks.AddDialogWithControls(dlg);
+                rebuild_radio_tag_list(dlg, state);
+            }
+
+            return TRUE;
+        }
+
+        case WM_COMMAND:
+            if (!state)
+                return FALSE;
+
+            if (LOWORD(wp) == kIdRbTagFilter &&
+                HIWORD(wp) == EN_CHANGE)
+            {
+                rebuild_radio_tag_list(dlg, state);
+                return TRUE;
+            }
+
+            if (LOWORD(wp) == kIdRbTagList &&
+                HIWORD(wp) == LBN_DBLCLK)
+            {
+                SendMessageW(dlg, WM_COMMAND, IDOK, 0);
+                return TRUE;
+            }
+
+            if (LOWORD(wp) == IDOK)
+            {
+                const LRESULT selection = SendDlgItemMessageW(
+                    dlg, kIdRbTagList, LB_GETCURSEL, 0, 0);
+
+                if (selection == LB_ERR ||
+                    static_cast<size_t>(selection) >= state->visible.size())
+                    return TRUE;
+
+                state->selected =
+                    state->tags[state->visible[
+                        static_cast<size_t>(selection)]].name;
+
+                EndDialog(dlg, IDOK);
+                return TRUE;
+            }
+
+            if (LOWORD(wp) == IDCANCEL)
+            {
+                EndDialog(dlg, IDCANCEL);
+                return TRUE;
+            }
+            break;
+
+        case WM_NCDESTROY:
+            SetWindowLongPtrW(dlg, DWLP_USER, 0);
+            break;
+        }
+
+        return FALSE;
+    }
+
+    static bool show_radio_tag_picker(
+        HWND owner,
+        const std::vector<radio_tag_item>& tags,
+        std::string& selected,
+        const wchar_t* dialogTitle,
+        const wchar_t* filterPrompt)
+    {
+        radio_tag_picker_state state;
+        state.tags = tags;
+
+        constexpr WORD kButton = 0x0080;
+        constexpr WORD kEdit = 0x0081;
+        constexpr WORD kStatic = 0x0082;
+        constexpr WORD kListBox = 0x0083;
+
+        dialog_template t;
+
+        t.begin(
+            WS_POPUP | WS_CAPTION | WS_SYSMENU |
+            DS_MODALFRAME | DS_CENTER,
+            0, 0, 300, 224,
+            dialogTitle, L"Segoe UI", 8);
+
+        t.item(kStatic, SS_LEFT,
+            8, 10, 284, 12, 0xFFFF,
+            filterPrompt);
+
+        t.item(kEdit, ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
+            8, 24, 284, 16, kIdRbTagFilter, L"");
+
+        t.item(kListBox,
+            LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
+            WS_VSCROLL | WS_BORDER | WS_TABSTOP,
+            8, 44, 284, 148, kIdRbTagList, L"");
+
+        t.item(kButton, BS_DEFPUSHBUTTON | WS_TABSTOP,
+            180, 200, 52, 16, IDOK, L"Select");
+
+        t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP,
+            240, 200, 52, 16, IDCANCEL, L"Cancel");
+
+        const INT_PTR result = DialogBoxIndirectParamW(
+            core_api::get_my_instance(),
+            t.data(),
+            owner,
+            radio_tag_picker_proc,
+            reinterpret_cast<LPARAM>(&state));
+
+        if (result != IDOK || state.selected.empty())
+            return false;
+
+        selected = std::move(state.selected);
+        return true;
+    }
+
+    bool choose_radio_browser_tag(HWND owner, std::string& selected)
+    {
+        static const char* const kTitle = "Radio Browser tags";
+
+        const auto fetched = std::make_shared<radio_fetch_result>();
+
+        service_ptr_t<threaded_process_callback> task =
+            new service_impl_t<radio_fetch_task>(
+                "/json/tags?order=stationcount&reverse=true",
+                fetched);
+
+        threaded_process::g_run_modal(
+            task,
+            threaded_process::flag_show_abort,
+            owner,
+            "Fetching Radio Browser tags...");
+
+        if (!fetched->error.empty())
+        {
+            const std::string message =
+                "Could not fetch Radio Browser tags:\r\n" + fetched->error;
+
+            popup_message::g_show(
+                message.c_str(), kTitle, popup_message::icon_error);
+            return false;
+        }
+
+        if (!fetched->finished)
+        {
+            popup_message::g_show(
+                "Tag loading cancelled.",
+                kTitle, popup_message::icon_information);
+            return false;
+        }
+
+        const json response = json::parse(fetched->body, nullptr, false);
+
+        if (response.is_discarded() || !response.is_array())
+        {
+            popup_message::g_show(
+                "Radio Browser returned an unexpected tag response.",
+                kTitle, popup_message::icon_error);
+            return false;
+        }
+
+        std::vector<radio_tag_item> tags;
+        tags.reserve(response.size());
+
+        for (const auto& item : response)
+        {
+            if (!item.is_object())
+                continue;
+
+            radio_tag_item tag;
+            tag.name = json_text(item, "name");
+
+            if (tag.name.empty())
+                continue;
+
+            tag.stationCount = radio_json_count(item);
+
+            tags.push_back(std::move(tag));
+        }
+
+        std::sort(tags.begin(), tags.end(),
+            [](const radio_tag_item& a, const radio_tag_item& b)
+            {
+                if (a.stationCount != b.stationCount)
+                    return a.stationCount > b.stationCount;
+
+                return radio_tag_lower(a.name) < radio_tag_lower(b.name);
+            });
+
+        if (tags.empty())
+        {
+            popup_message::g_show(
+                "Radio Browser returned no tags.",
+                kTitle, popup_message::icon_information);
+            return false;
+        }
+
+        return show_radio_tag_picker(
+            owner, tags, selected,
+            L"Select Radio Browser tag", L"Filter tags by name:");
+    }
+
+    // Lists every country Radio Browser knows (name + two-letter code) and
+    // returns the chosen code, e.g. "DE".
+    bool choose_radio_browser_country(HWND owner, std::string& selected)
+    {
+        static const char* const kTitle = "Radio Browser countries";
+
+        const auto fetched = std::make_shared<radio_fetch_result>();
+
+        service_ptr_t<threaded_process_callback> task =
+            new service_impl_t<radio_fetch_task>(
+                "/json/countries?hidebroken=true&order=name",
+                fetched);
+
+        threaded_process::g_run_modal(
+            task,
+            threaded_process::flag_show_abort,
+            owner,
+            "Fetching Radio Browser countries...");
+
+        if (!fetched->error.empty())
+        {
+            const std::string message =
+                "Could not fetch Radio Browser countries:\r\n" +
+                fetched->error;
+
+            popup_message::g_show(
+                message.c_str(), kTitle, popup_message::icon_error);
+            return false;
+        }
+
+        if (!fetched->finished)
+        {
+            popup_message::g_show(
+                "Country loading cancelled.",
+                kTitle, popup_message::icon_information);
+            return false;
+        }
+
+        const json response = json::parse(fetched->body, nullptr, false);
+
+        if (response.is_discarded() || !response.is_array())
+        {
+            popup_message::g_show(
+                "Radio Browser returned an unexpected country response.",
+                kTitle, popup_message::icon_error);
+            return false;
+        }
+
+        std::vector<radio_tag_item> countries;
+        countries.reserve(response.size());
+
+        for (const auto& item : response)
+        {
+            if (!item.is_object())
+                continue;
+
+            radio_tag_item country;
+            country.name = json_text(item, "iso_3166_1");
+
+            // Only entries with a usable two-letter code can be searched for.
+            if (country.name.size() != 2 ||
+                !is_ascii_letter(static_cast<wchar_t>(country.name[0])) ||
+                !is_ascii_letter(static_cast<wchar_t>(country.name[1])))
+                continue;
+
+            std::transform(country.name.begin(), country.name.end(),
+                country.name.begin(),
+                [](unsigned char c)
+                {
+                    return static_cast<char>(std::toupper(c));
+                });
+
+            country.title = json_text(item, "name");
+            country.stationCount = radio_json_count(item);
+            countries.push_back(std::move(country));
+        }
+
+        std::sort(countries.begin(), countries.end(),
+            [](const radio_tag_item& a, const radio_tag_item& b)
+            {
+                const std::string an = radio_tag_lower(
+                    a.title.empty() ? a.name : a.title);
+                const std::string bn = radio_tag_lower(
+                    b.title.empty() ? b.name : b.title);
+
+                if (an != bn)
+                    return an < bn;
+
+                return a.name < b.name;
+            });
+
+        if (countries.empty())
+        {
+            popup_message::g_show(
+                "Radio Browser returned no countries.",
+                kTitle, popup_message::icon_information);
+            return false;
+        }
+
+        return show_radio_tag_picker(
+            owner, countries, selected,
+            L"Select Radio Browser country",
+            L"Filter by country name or code:");
     }
 
     // "Radio Browser - jazz - DE - 128+ kbps - top 100": describes a search.
