@@ -48,7 +48,8 @@ DECLARE_COMPONENT_VERSION(
     "- Set default utag folder... / Create utag files in default folder: no prompt\n"
     "- Main menu: File > Add internet radio url and create utag (enter a URL, get a .utag)\n"
     "- Main menu: File > Import stations from Radio Browser... (creates many .utag files)\n"
-    "- Optional playback-time favicon download (Preferences > Advanced > Tools)\n"
+    "- Preferences page: Preferences > Tools > Utag Input\n"
+    "- Optional playback-time favicon download (Preferences > Tools > Utag Input)\n"
     "\n"
     "utag format: [ { \"@\": \"http://host:port/stream\", \"name\": \"Station\", ... } ]"
 );
@@ -299,56 +300,43 @@ static bool reference_is_utag(const std::string& ref)
 // seconds, and a new instance for the same URL picks it up instead of
 // reconnecting.
 //
-// Preferences > Advanced > Tools. On by default.
+// Preferences > Tools > Utag Input. On by default.
 // -----------------------------------------------------------------------------
 
-// {2A6D5E81-93C4-4B7F-A108-6ED34C9B5720}
-static const GUID g_guid_adv_handoff =
-{ 0x2a6d5e81, 0x93c4, 0x4b7f, { 0xa1, 0x08, 0x6e, 0xd3, 0x4c, 0x9b, 0x57, 0x20 } };
+// {1DE83138-5922-43DB-9226-CB9B059F8C1A}
+static const GUID g_guid_cfg_handoff =
+{ 0x1de83138, 0x5922, 0x43db, { 0x92, 0x26, 0xcb, 0x9b, 0x05, 0x9f, 0x8c, 0x1a } };
 
-static advconfig_checkbox_factory g_adv_handoff(
-    "utag: reuse stream when playing item is retagged",
-    g_guid_adv_handoff,
-    advconfig_branch::guid_branch_tools,
-    0,
-    true);
+static cfg_bool g_cfg_handoff(g_guid_cfg_handoff, true);
 
 static bool handoff_enabled()
 {
-    return g_adv_handoff.get_static_instance().get_state();
+    return g_cfg_handoff;
 }
 
 
 // Optional playback-time favicon download. The image is stored beside the
 // .utag file, using the same basename and the favicon URL's file extension.
-static const GUID g_guid_adv_favicon =
-{ 0x6f4f9b12, 0x8a3d, 0x4d2c, { 0x91, 0x70, 0x2b, 0x4c, 0x61, 0x7e, 0x35, 0xa9 } };
+// {30D0CE54-00A8-4EF0-98FB-02E9906B9422}
+static const GUID g_guid_cfg_favicon =
+{ 0x30d0ce54, 0x00a8, 0x4ef0, { 0x98, 0xfb, 0x02, 0xe9, 0x90, 0x6b, 0x94, 0x22 } };
 
-static advconfig_checkbox_factory g_adv_favicon(
-    "utag: download favicon image during playback",
-    g_guid_adv_favicon,
-    advconfig_branch::guid_branch_tools,
-    1,
-    false);
+static cfg_bool g_cfg_favicon(g_guid_cfg_favicon, false);
 
 static bool favicon_download_enabled()
 {
-    return g_adv_favicon.get_static_instance().get_state();
+    return g_cfg_favicon;
 }
 
-static const GUID g_guid_adv_logging =
-{ 0x9d8c1a2b, 0x1234, 0x4a2b, { 0x91, 0x70, 0x2b, 0x4c, 0x61, 0x7e, 0x35, 0xb1 } };
+// {D65D2ADE-1652-4447-BD71-21BF4C86EE8D}
+static const GUID g_guid_cfg_logging =
+{ 0xd65d2ade, 0x1652, 0x4447, { 0xbd, 0x71, 0x21, 0xbf, 0x4c, 0x86, 0xee, 0x8d } };
 
-static advconfig_checkbox_factory g_adv_logging(
-    "utag: enable console logging",
-    g_guid_adv_logging,
-    advconfig_branch::guid_branch_tools,
-    2,
-    true);
+static cfg_bool g_cfg_logging(g_guid_cfg_logging, true);
 
 static bool utag_console_logging_enabled()
 {
-    return g_adv_logging.get_static_instance().get_state();
+    return g_cfg_logging;
 }
 
 // Convenience logging macro used throughout this file. Replace existing
@@ -436,9 +424,6 @@ static bool is_image_file_by_magic(const std::wstring& path)
         // Accept only a real <svg> element. A bare "<?xml" is often an XML or
         // HTML error page (e.g. a 404) and must not be saved as artwork.
         const std::string s(reinterpret_cast<char*>(buf), static_cast<size_t>(got));
-
-
-
         if (s.find("<svg") != std::string::npos) return true;
     }
 
@@ -506,19 +491,8 @@ static void schedule_favicon_download_for_playback(
 
         // Same extension rule as the artwork extractor (see
         // favicon_extension_for_url).
-
-
-
         const std::wstring extension =
             utf8_to_wide(favicon_extension_for_url(url));
-
-
-
-
-
-
-
-
 
         const std::wstring imagePath = widePath.substr(0, dot) + extension;
 
@@ -794,35 +768,6 @@ namespace
     // Apply playback-discovered technical info to foobar2000's metadata DB.
     // Properties reads the metadb snapshot; changing our private cache alone
     // does not update that snapshot. The forced hint is committed on main thread.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     void tech_refresh_metadb(const std::string& path, const file_info& decoderInfo)
     {
         try
@@ -910,9 +855,6 @@ public:
             return false;
 
         return _stricmp(value.c_str() + value.size() - 5, ".utag") == 0;
-
-
-
     }
 
     static bool g_is_our_content_type(const char*)
@@ -1411,13 +1353,7 @@ public:
             : json(m_url);
 
         // Remove old standard tags regardless of key capitalization.
-
-
-
         erase_tag_fields(updated);
-
-
-
 
         for (t_size i = 0; i < info.meta_get_count(); ++i)
         {
@@ -1498,13 +1434,7 @@ public:
             ? *reservedUrlIt
             : json(m_url);
 
-
-
-
         erase_tag_fields(updated);
-
-
-
 
         updated["@"] = reservedUrl;
 
@@ -1636,7 +1566,6 @@ private:
         // Fallback: overwrite the existing .utag in place.
         service_ptr_t<file> output;
 
-
         filesystem::g_open_write_new(
             output,
             m_path.c_str(),
@@ -1691,117 +1620,6 @@ static std::string wide_to_utf8(const std::wstring& text)
     result.resize(static_cast<size_t>(count - 1));
     return result;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // -----------------------------------------------------------------------------
 // Playlist context-menu command: create one .utag file per selected track.
@@ -2565,6 +2383,213 @@ namespace
         name = state.name;
         return true;
     }
+
+    // -------------------------------------------------------------------------
+    // Preferences page: Preferences > Tools > Utag Input
+    // -------------------------------------------------------------------------
+    constexpr int kPrefHandoff = 2001;
+    constexpr int kPrefFavicon = 2002;
+    constexpr int kPrefFolder = 2003;
+    constexpr int kPrefBrowse = 2004;
+    constexpr int kPrefLogging = 2005;
+
+    // {85C77DE3-3774-474F-A8EA-87564A3BBDE9}
+    static const GUID g_guid_prefs_page =
+    { 0x85c77de3, 0x3774, 0x474f, { 0xa8, 0xea, 0x87, 0x56, 0x4a, 0x3b, 0xbd, 0xe9 } };
+
+    class utag_prefs_instance : public preferences_page_instance
+    {
+    public:
+        utag_prefs_instance(HWND parent, preferences_page_callback::ptr callback)
+            : m_callback(callback)
+        {
+            constexpr WORD kButton = 0x0080, kEdit = 0x0081, kStatic = 0x0082;
+            constexpr DWORD kGroup = BS_GROUPBOX;
+            constexpr DWORD kCheck = BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP;
+
+            dialog_template t;
+            t.begin(WS_CHILD | DS_CONTROL, 0, 0, 280, 160, L"", L"Segoe UI", 8);
+
+            t.item(kButton, kGroup, 0, 0, 280, 64, 0xFFFF, L"Playback");
+            t.item(kButton, kCheck, 8, 12, 264, 20, kPrefHandoff,
+                L"Reuse the running stream when the playing item is retagged (avoids a reconnect pause)");
+            t.item(kButton, kCheck, 8, 36, 264, 20, kPrefFavicon,
+                L"Download the favicon image during playback (saved next to the .utag file)");
+
+            t.item(kButton, kGroup, 0, 70, 280, 54, 0xFFFF, L"Default folder");
+            t.item(kStatic, SS_LEFT, 8, 82, 264, 18, 0xFFFF,
+                L"Used by \"Create utag files in default folder\". Leave empty to be asked when needed.");
+            t.item(kEdit, ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 8, 102, 198, 13, kPrefFolder, L"");
+            t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 212, 101, 60, 14, kPrefBrowse, L"Browse...");
+
+            t.item(kButton, kGroup, 0, 130, 280, 28, 0xFFFF, L"Diagnostics");
+            t.item(kButton, kCheck, 8, 142, 264, 10, kPrefLogging,
+                L"Write messages to the foobar2000 console");
+
+            m_hwnd = CreateDialogIndirectParamW(
+                core_api::get_my_instance(), t.data(), parent,
+                &utag_prefs_instance::dlg_proc, reinterpret_cast<LPARAM>(this));
+        }
+
+        ~utag_prefs_instance()
+        {
+            if (m_hwnd && IsWindow(m_hwnd))
+                DestroyWindow(m_hwnd);
+        }
+
+        fb2k::hwnd_t get_wnd() override { return m_hwnd; }
+
+        t_uint32 get_state() override
+        {
+            t_uint32 state = preferences_state::resettable | preferences_state::dark_mode_supported;
+            if (has_changed())
+                state |= preferences_state::changed;
+            return state;
+        }
+
+        void apply() override
+        {
+            g_cfg_handoff = checked(kPrefHandoff);
+            g_cfg_favicon = checked(kPrefFavicon);
+            g_cfg_logging = checked(kPrefLogging);
+            g_cfg_default_dir.set_string(folder_utf8().c_str());
+            m_callback->on_state_changed();
+        }
+
+        void reset() override
+        {
+            set_checked(kPrefHandoff, true);
+            set_checked(kPrefFavicon, false);
+            set_checked(kPrefLogging, true);
+            SetDlgItemTextW(m_hwnd, kPrefFolder, L"");
+            m_callback->on_state_changed();
+        }
+
+    private:
+        bool checked(int id) const
+        {
+            return IsDlgButtonChecked(m_hwnd, id) == BST_CHECKED;
+        }
+
+        void set_checked(int id, bool value)
+        {
+            CheckDlgButton(m_hwnd, id, value ? BST_CHECKED : BST_UNCHECKED);
+        }
+
+        std::string folder_utf8() const
+        {
+            return wide_to_utf8(trim_wide(read_dialog_text(m_hwnd, kPrefFolder)));
+        }
+
+        bool has_changed() const
+        {
+            if (!m_hwnd)
+                return false;
+
+            return checked(kPrefHandoff) != static_cast<bool>(g_cfg_handoff)
+                || checked(kPrefFavicon) != static_cast<bool>(g_cfg_favicon)
+                || checked(kPrefLogging) != static_cast<bool>(g_cfg_logging)
+                || folder_utf8() != std::string(g_cfg_default_dir.get_ptr());
+        }
+
+        void load_values()
+        {
+            m_loading = true;
+            set_checked(kPrefHandoff, g_cfg_handoff);
+            set_checked(kPrefFavicon, g_cfg_favicon);
+            set_checked(kPrefLogging, g_cfg_logging);
+
+            try
+            {
+                SetDlgItemTextW(m_hwnd, kPrefFolder,
+                    utf8_to_wide(g_cfg_default_dir.get_ptr()).c_str());
+            }
+            catch (...)
+            {
+            }
+
+            SendDlgItemMessageW(m_hwnd, kPrefFolder, EM_SETCUEBANNER, FALSE,
+                reinterpret_cast<LPARAM>(L"Ask when needed"));
+            m_loading = false;
+        }
+
+        void browse()
+        {
+            const std::wstring start = trim_wide(read_dialog_text(m_hwnd, kPrefFolder));
+            std::wstring chosen;
+            if (pick_folder(m_hwnd, start, chosen))
+                SetDlgItemTextW(m_hwnd, kPrefFolder, chosen.c_str());
+        }
+
+        static INT_PTR CALLBACK dlg_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+        {
+            auto* self = reinterpret_cast<utag_prefs_instance*>(
+                GetWindowLongPtrW(dlg, DWLP_USER));
+
+            switch (msg)
+            {
+            case WM_INITDIALOG:
+                self = reinterpret_cast<utag_prefs_instance*>(lp);
+                SetWindowLongPtrW(dlg, DWLP_USER, lp);
+                self->m_hwnd = dlg;
+                self->m_darkHooks.AddDialogWithControls(dlg);
+                self->load_values();
+                return TRUE;
+
+            case WM_COMMAND:
+                if (!self || self->m_loading)
+                    break;
+
+                switch (LOWORD(wp))
+                {
+                case kPrefBrowse:
+                    if (HIWORD(wp) == BN_CLICKED)
+                        self->browse();
+                    break;
+                case kPrefHandoff:
+                case kPrefFavicon:
+                case kPrefLogging:
+                    if (HIWORD(wp) == BN_CLICKED)
+                        self->m_callback->on_state_changed();
+                    break;
+                case kPrefFolder:
+                    if (HIWORD(wp) == EN_CHANGE)
+                        self->m_callback->on_state_changed();
+                    break;
+                }
+                break;
+
+            case WM_NCDESTROY:
+                if (self)
+                    self->m_hwnd = nullptr;
+                SetWindowLongPtrW(dlg, DWLP_USER, 0);
+                break;
+            }
+
+            return FALSE;
+        }
+
+        HWND m_hwnd = nullptr;
+        bool m_loading = false;
+        preferences_page_callback::ptr m_callback;
+        fb2k::CCoreDarkModeHooks m_darkHooks;
+    };
+
+    class utag_prefs_page : public preferences_page_v3
+    {
+    public:
+        const char* get_name() override { return "Utag Input"; }
+        GUID get_guid() override { return g_guid_prefs_page; }
+        GUID get_parent_guid() override { return preferences_page::guid_tools; }
+
+        preferences_page_instance::ptr instantiate(
+            fb2k::hwnd_t parent, preferences_page_callback::ptr callback) override
+        {
+            return new service_impl_t<utag_prefs_instance>(parent, callback);
+        }
+    };
+
+    preferences_page_factory_t<utag_prefs_page> g_utag_prefs_factory;
 
     // "http://host:8000/stream" -> "host_8000" (used when no name is given).
     std::string station_label_from_url(const std::string& url)
@@ -3570,16 +3595,6 @@ g_create_utag_context_menu_factory;
 // sidecar exists; later queries can use it. If it is not present, preserve the
 // referenced-file fallback. The built-in viewer may cache artwork and may need
 // its own refresh/track-change before it asks again.
-
-
-
-
-
-
-
-
-
-
 class utag_album_art_extractor_instance : public album_art_extractor_instance
 {
 public:
@@ -3684,15 +3699,6 @@ public:
             if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0)
             {
                 const std::string extension = favicon_extension_for_url(url);
-
-
-
-
-
-
-
-
-
 
                 std::string nativePath = to_native_windows_path(path);
                 const size_t pathSlash = nativePath.find_last_of("\\/");
