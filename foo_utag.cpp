@@ -2944,10 +2944,12 @@ namespace
     constexpr int kIdRbBitrate = 1104;
     constexpr int kIdRbLimit = 1105;
     constexpr int kIdRbStatus = 1106;
+    constexpr int kIdRbCodec = 1107;
     constexpr WORD kIdRbShowTags = 2106;
     constexpr WORD kIdRbTagFilter = 2107;
     constexpr WORD kIdRbTagList = 2108;
     constexpr WORD kIdRbShowCountries = 2109;
+    constexpr WORD kIdRbShowCodecs = 2110;
 
 
     constexpr size_t kRbMaxDetailedEntries = 60; // results popup stays readable
@@ -2957,6 +2959,7 @@ namespace
         std::string name;
         std::string tag;
         std::string countryCode;
+        std::string codec;
         long minBitrate = 0;
         long limit = 100;
     };
@@ -2992,6 +2995,7 @@ namespace
 
     bool choose_radio_browser_tag(HWND owner, std::string& selected);
     bool choose_radio_browser_country(HWND owner, std::string& selected);
+    bool choose_radio_browser_codec(HWND owner, std::string& selected);
     void start_radio_import(const radio_query& query, const std::wstring& parentFolder);
 
 
@@ -3037,6 +3041,25 @@ namespace
 
                         SetDlgItemTextW(
                             dlg, kIdRbTag, wideTag.c_str());
+                    }
+                }
+
+                return TRUE;
+            }
+
+            // Show all Radio Browser codecs.
+            if (id == kIdRbShowCodecs && HIWORD(wp) == BN_CLICKED)
+            {
+                if (state != nullptr)
+                {
+                    std::string selected;
+
+                    if (choose_radio_browser_codec(dlg, selected))
+                    {
+                        const std::wstring wideCodec = utf8_to_wide(selected);
+
+                        SetDlgItemTextW(
+                            dlg, kIdRbCodec, wideCodec.c_str());
                     }
                 }
 
@@ -3116,6 +3139,9 @@ namespace
                         read_dialog_text(dlg, kIdRbTag)));
 
                 query.countryCode = wide_to_utf8(country);
+                query.codec =
+                    wide_to_utf8(trim_wide(
+                        read_dialog_text(dlg, kIdRbCodec)));
                 query.minBitrate = minBitrate;
                 query.limit = limit;
 
@@ -3179,7 +3205,7 @@ namespace
         t.begin(
             WS_POPUP | WS_CAPTION | WS_SYSMENU |
             DS_MODALFRAME | DS_CENTER,
-            0, 0, 300, 142,
+            0, 0, 300, 160,
             L"Import stations from Radio Browser",
             L"Segoe UI", 8);
 
@@ -3210,30 +3236,41 @@ namespace
 
         t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP,
             220, 46, 72, 14, kIdRbShowCountries,
-            L"Show all codes");
+            L"Show all countries");
 
         t.item(kStatic, SS_LEFT,
             8, 66, 78, 10, 0xFFFF,
-            L"Min. bitrate:");
+            L"Codec:");
 
-        t.item(kEdit, kEditStyle | ES_NUMBER,
-            90, 64, 202, 13, kIdRbBitrate, L"");
+        t.item(kEdit, kEditStyle,
+            90, 64, 126, 13, kIdRbCodec, L"");
+
+        t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP,
+            220, 64, 72, 14, kIdRbShowCodecs,
+            L"Show all codecs");
 
         t.item(kStatic, SS_LEFT,
             8, 84, 78, 10, 0xFFFF,
+            L"Min. bitrate:");
+
+        t.item(kEdit, kEditStyle | ES_NUMBER,
+            90, 82, 202, 13, kIdRbBitrate, L"");
+
+        t.item(kStatic, SS_LEFT,
+            8, 102, 78, 10, 0xFFFF,
             L"Max stations:");
 
         t.item(kEdit, kEditStyle | ES_NUMBER,
-            90, 82, 202, 13, kIdRbLimit, L"100");
+            90, 100, 202, 13, kIdRbLimit, L"100");
 
         t.item(kStatic, SS_LEFT,
-            8, 103, 284, 10, kIdRbStatus, L"");
+            8, 121, 284, 10, kIdRbStatus, L"");
 
         t.item(kButton, BS_DEFPUSHBUTTON | WS_TABSTOP,
-            180, 120, 52, 14, IDOK, L"Import");
+            180, 138, 52, 14, IDOK, L"Import");
 
         t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP,
-            240, 120, 52, 14, IDCANCEL, L"Cancel");
+            240, 138, 52, 14, IDCANCEL, L"Cancel");
 
         auto* state = new radio_prompt_state;
 
@@ -3293,6 +3330,8 @@ namespace
                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
             path += "&countrycode=" + percent_encode(code);
         }
+        if (!q.codec.empty())
+            path += "&codec=" + percent_encode(q.codec);
         if (q.minBitrate > 0)
             path += "&bitrateMin=" + std::to_string(q.minBitrate);
 
@@ -3835,6 +3874,95 @@ namespace
             L"Filter by country name or code:");
     }
 
+    // Lists the codecs Radio Browser knows (most used first) and returns the
+    // chosen one, e.g. "MP3" or "AAC+".
+    bool choose_radio_browser_codec(HWND owner, std::string& selected)
+    {
+        static const char* const kTitle = "Radio Browser codecs";
+
+        const auto fetched = std::make_shared<radio_fetch_result>();
+
+        service_ptr_t<threaded_process_callback> task =
+            new service_impl_t<radio_fetch_task>(
+                "/json/codecs?hidebroken=true&order=stationcount&reverse=true",
+                fetched);
+
+        threaded_process::g_run_modal(
+            task,
+            threaded_process::flag_show_abort,
+            owner,
+            "Fetching Radio Browser codecs...");
+
+        if (!fetched->error.empty())
+        {
+            const std::string message =
+                "Could not fetch Radio Browser codecs:\r\n" +
+                fetched->error;
+
+            popup_message::g_show(
+                message.c_str(), kTitle, popup_message::icon_error);
+            return false;
+        }
+
+        if (!fetched->finished)
+        {
+            popup_message::g_show(
+                "Codec loading cancelled.",
+                kTitle, popup_message::icon_information);
+            return false;
+        }
+
+        const json response = json::parse(fetched->body, nullptr, false);
+
+        if (response.is_discarded() || !response.is_array())
+        {
+            popup_message::g_show(
+                "Radio Browser returned an unexpected codec response.",
+                kTitle, popup_message::icon_error);
+            return false;
+        }
+
+        std::vector<radio_tag_item> codecs;
+        codecs.reserve(response.size());
+
+        for (const auto& item : response)
+        {
+            if (!item.is_object())
+                continue;
+
+            radio_tag_item codec;
+            codec.name = json_text(item, "name");
+
+            if (codec.name.empty())
+                continue;
+
+            codec.stationCount = radio_json_count(item);
+            codecs.push_back(std::move(codec));
+        }
+
+        std::sort(codecs.begin(), codecs.end(),
+            [](const radio_tag_item& a, const radio_tag_item& b)
+            {
+                if (a.stationCount != b.stationCount)
+                    return a.stationCount > b.stationCount;
+
+                return radio_tag_lower(a.name) < radio_tag_lower(b.name);
+            });
+
+        if (codecs.empty())
+        {
+            popup_message::g_show(
+                "Radio Browser returned no codecs.",
+                kTitle, popup_message::icon_information);
+            return false;
+        }
+
+        return show_radio_tag_picker(
+            owner, codecs, selected,
+            L"Select Radio Browser codec",
+            L"Filter codecs by name:");
+    }
+
     // "Radio Browser - jazz - DE - 128+ kbps - top 100": describes a search.
     std::string describe_radio_query(const radio_query& q)
     {
@@ -3851,6 +3979,8 @@ namespace
                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
             text += " - " + code;
         }
+        if (!q.codec.empty())
+            text += " - " + q.codec;
         if (q.minBitrate > 0)
             text += " - " + std::to_string(q.minBitrate) + "+ kbps";
 
