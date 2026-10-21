@@ -32,7 +32,7 @@ using json = nlohmann::json;
 
 DECLARE_COMPONENT_VERSION(
     "utag Input",
-    "1.0.7",
+    "1.0.8",
     "Adds internet radio streams and other remote URLs to the Media Library.\n"
     "\n"
     "Each .utag file is a small JSON stub that stores a stream URL (\"@\") together\n"
@@ -284,6 +284,14 @@ static bool is_local_file_reference(const std::string& url)
     return false;
 }
 
+// True when a reference points at another .utag stub. Such a reference would
+// make the input (or the artwork extractor/editor) open itself recursively.
+static bool reference_is_utag(const std::string& ref)
+{
+    return ref.size() >= 5 &&
+        _stricmp(ref.c_str() + ref.size() - 5, ".utag") == 0;
+}
+
 // -----------------------------------------------------------------------------
 // When the playing item is retagged, foobar2000 closes the playing input and
 // opens a new one, which reconnects the live stream (audible pause). With this
@@ -364,6 +372,26 @@ static bool is_known_image_ext(const std::string& ext)
     return false;
 }
 
+// Extension (with leading dot) of the favicon image stored beside a .utag
+// file. Used by BOTH the downloader and the artwork extractor so they always
+// agree on the sidecar's filename.
+static std::string favicon_extension_for_url(const std::string& url)
+{
+    std::string extension = ".png";
+    const size_t query = url.find_first_of("?#");
+    const std::string urlPath = url.substr(0, query);
+    const size_t dot = urlPath.find_last_of('.');
+    const size_t slash = urlPath.find_last_of('/');
+    if (dot != std::string::npos &&
+        (slash == std::string::npos || dot > slash))
+    {
+        const std::string ext = urlPath.substr(dot); // includes leading dot
+        if (ext.size() >= 2 && ext.size() <= 12 && is_known_image_ext(ext))
+            extension = ext;
+    }
+    return extension;
+}
+
 static bool is_image_file_by_magic(const std::wstring& path)
 {
     // Read a few leading bytes and check common image signatures.
@@ -371,7 +399,7 @@ static bool is_image_file_by_magic(const std::wstring& path)
         FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
 
-    unsigned char buf[16] = { 0 };
+    unsigned char buf[512] = { 0 };
     DWORD got = 0;
     const BOOL ok = ReadFile(h, buf, sizeof(buf), &got, nullptr);
     CloseHandle(h);
@@ -402,18 +430,19 @@ static bool is_image_file_by_magic(const std::wstring& path)
         buf[8] == 'W' && buf[9] == 'E' && buf[10] == 'B' && buf[11] == 'P')
         return true;
 
-    // Heuristic fallback: SVG / XML (starts with '<') � treat as image if it looks like an SVG tag.
+    // Heuristic fallback: SVG / XML (starts with '<') - treat as image if it looks like an SVG tag.
     if (buf[0] == '<')
     {
-        // check for "<?xml" or "<svg"
+        // Accept only a real <svg> element. A bare "<?xml" is often an XML or
+        // HTML error page (e.g. a 404) and must not be saved as artwork.
         const std::string s(reinterpret_cast<char*>(buf), static_cast<size_t>(got));
-        auto pos = s.find("svg");
-        if (pos != std::string::npos) return true;
-        pos = s.find("<?xml");
-        if (pos != std::string::npos) return true;
+
+
+
+        if (s.find("<svg") != std::string::npos) return true;
     }
 
-    // NOTE: ICO support intentionally removed � do not accept ICO signature.
+    // NOTE: ICO support intentionally removed - do not accept ICO signature.
 
     return false;
 }
@@ -475,21 +504,21 @@ static void schedule_favicon_download_for_playback(
             (slash != std::wstring::npos && dot < slash))
             return;
 
-        // Preserve the original image extension from the favicon URL path.
-        // Ignore query/fragment strings (for example, icon.png?v=2). Accept only
-        // known image extensions; otherwise fall back to .png to avoid .ico.
-        std::wstring extension = L".png";
-        const size_t urlQuery = url.find_first_of("?#");
-        const std::string urlPath = url.substr(0, urlQuery);
-        const size_t urlDot = urlPath.find_last_of('.');
-        const size_t urlSlash = urlPath.find_last_of('/');
-        if (urlDot != std::string::npos &&
-            (urlSlash == std::string::npos || urlDot > urlSlash))
-        {
-            const std::string ext = urlPath.substr(urlDot); // includes leading dot
-            if (ext.size() >= 2 && ext.size() <= 12 && is_known_image_ext(ext))
-                extension = utf8_to_wide(ext);
-        }
+        // Same extension rule as the artwork extractor (see
+        // favicon_extension_for_url).
+
+
+
+        const std::wstring extension =
+            utf8_to_wide(favicon_extension_for_url(url));
+
+
+
+
+
+
+
+
 
         const std::wstring imagePath = widePath.substr(0, dot) + extension;
 
@@ -594,6 +623,8 @@ namespace
     std::string g_handoffUrl;
     service_ptr_t<input_decoder> g_handoffDecoder;
     ULONGLONG g_handoffTime = 0;
+    HANDLE g_handoffTimer = nullptr;            // guarded by g_handoffMutex
+    std::atomic<bool> g_handoffShutdown{ false }; // set once on_quit runs
 
     // Drops the parked decoder if it is stale (or always, when forced).
     // The decoder is released outside the lock, because closing the
@@ -633,7 +664,13 @@ namespace
         const std::string& url,
         const service_ptr_t<input_decoder>& decoder)
     {
+        // Once shutdown has started, park nothing: a pending timer could
+        // otherwise fire after this DLL has been unloaded.
+        if (g_handoffShutdown.load())
+            return;
+
         service_ptr_t<input_decoder> old;
+        HANDLE oldTimer = nullptr;
 
         {
             std::lock_guard<std::mutex> lock(g_handoffMutex);
@@ -642,21 +679,33 @@ namespace
             g_handoffDecoder = decoder;
             g_handoffUrl = url;
             g_handoffTime = GetTickCount64();
+
+            oldTimer = g_handoffTimer;
+            g_handoffTimer = nullptr;
         }
 
         old.release();
 
+        // The previous timer is finished or superseded; release it. A null
+        // completion event makes this call non-blocking.
+        if (oldTimer != nullptr)
+            DeleteTimerQueueTimer(nullptr, oldTimer, nullptr);
+
         // If nobody picks it up (playback really stopped), close the stream
         // shortly after the handoff window ends.
         HANDLE timer = nullptr;
-        CreateTimerQueueTimer(
+        if (CreateTimerQueueTimer(
             &timer,
             nullptr,
             handoff_timer,
             nullptr,
             static_cast<DWORD>(kHandoffMaxAgeMs + 500),
             0,
-            WT_EXECUTEONLYONCE);
+            WT_EXECUTEONLYONCE))
+        {
+            std::lock_guard<std::mutex> lock(g_handoffMutex);
+            g_handoffTimer = timer;
+        }
     }
 
     bool handoff_take(
@@ -688,7 +737,19 @@ namespace
 
         void on_quit() override
         {
+            g_handoffShutdown.store(true);
             handoff_clear(true);
+
+            // Wait for a running timer callback and release the timer, so
+            // nothing can call into this DLL after it is unloaded.
+            HANDLE timer = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(g_handoffMutex);
+                timer = g_handoffTimer;
+                g_handoffTimer = nullptr;
+            }
+            if (timer != nullptr)
+                DeleteTimerQueueTimer(nullptr, timer, INVALID_HANDLE_VALUE);
         }
     };
 
@@ -733,34 +794,34 @@ namespace
     // Apply playback-discovered technical info to foobar2000's metadata DB.
     // Properties reads the metadb snapshot; changing our private cache alone
     // does not update that snapshot. The forced hint is committed on main thread.
-    class tech_info_metadb_hint_callback : public main_thread_callback
-    {
-    public:
-        tech_info_metadb_hint_callback(
-            metadb_handle_ptr handle, const file_info& info, const t_filestats& stats)
-            : m_handle(std::move(handle)), m_stats(stats)
-        {
-            m_info.copy(info);
-        }
 
-        void callback_run() override
-        {
-            try
-            {
-                auto hints = metadb_hint_list_v3::create();
-                hints->add_hint_forced(m_handle, m_info, m_stats, true);
-                hints->on_done();
-            }
-            catch (const std::exception&)
-            {
-            }
-        }
 
-    private:
-        metadb_handle_ptr m_handle;
-        file_info_impl m_info;
-        t_filestats m_stats;
-    };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     void tech_refresh_metadb(const std::string& path, const file_info& decoderInfo)
     {
@@ -848,10 +909,10 @@ public:
         if (value.size() < 5)
             return false;
 
-        const std::string extension = value.substr(value.size() - 5);
+        return _stricmp(value.c_str() + value.size() - 5, ".utag") == 0;
 
-        return extension == ".utag"
-            || extension == ".UTAG";
+
+
     }
 
     static bool g_is_our_content_type(const char*)
@@ -961,6 +1022,10 @@ public:
         }
 
         m_url = urlIt->get<std::string>();
+
+        // A stub that points at another .utag would recurse forever.
+        if (reference_is_utag(m_url))
+            throw exception_io_data();
 
         // Download optional station artwork only when this .utag is opened
         // for actual playback, never during library scans or Properties reads.
@@ -1346,13 +1411,13 @@ public:
             : json(m_url);
 
         // Remove old standard tags regardless of key capitalization.
-        for (auto it = updated.begin(); it != updated.end();)
-        {
-            if (is_standard_tag_key(it.key()))
-                it = updated.erase(it);
-            else
-                ++it;
-        }
+
+
+
+        erase_tag_fields(updated);
+
+
+
 
         for (t_size i = 0; i < info.meta_get_count(); ++i)
         {
@@ -1433,13 +1498,13 @@ public:
             ? *reservedUrlIt
             : json(m_url);
 
-        for (auto it = updated.begin(); it != updated.end();)
-        {
-            if (is_standard_tag_key(it.key()))
-                it = updated.erase(it);
-            else
-                ++it;
-        }
+
+
+
+        erase_tag_fields(updated);
+
+
+
 
         updated["@"] = reservedUrl;
 
@@ -1447,6 +1512,45 @@ public:
     }
 
 private:
+    // True when get_info() exposes this JSON field as a metadata tag.
+    static bool is_exposed_tag(const std::string& key, const json& value)
+    {
+        if (is_reserved_key(key) || value.is_null())
+            return false;
+
+        if (value.is_array())
+        {
+            for (const auto& item : value)
+            {
+                if (!item.is_null() && !item.is_object() && !item.is_array())
+                    return true;
+            }
+            return false;
+        }
+
+        return !value.is_object();
+    }
+
+    // Removes every field that Properties can show and edit, so that fields
+    // the user cleared or renamed are really removed from the file. Only "@"
+    // and nested (non-tag) data are kept.
+    static void erase_tag_fields(json& station)
+    {
+        for (auto it = station.begin(); it != station.end();)
+        {
+            if (!is_reserved_key(it.key()) &&
+                (is_standard_tag_key(it.key()) ||
+                    is_exposed_tag(it.key(), it.value())))
+            {
+                it = station.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Release the read handle, write the file, then reopen it.
     // -------------------------------------------------------------------------
@@ -1470,16 +1574,69 @@ private:
     // Serialize the station object as a one-element JSON array.
     // -------------------------------------------------------------------------
 
+    // Writes to "<file>.tmp" and swaps it in, so a failure or abort halfway
+    // can never leave a truncated .utag behind. Returns false when this is
+    // not possible (the caller then writes in place).
+    bool write_json_atomic(const std::string& contents, abort_callback& abort)
+    {
+        if (m_path.rfind("file://", 0) != 0)
+            return false;
+
+        std::wstring target;
+        try
+        {
+            target = utf8_to_wide(m_path.substr(7));
+        }
+        catch (...)
+        {
+            return false;
+        }
+
+        abort.check();
+
+        const std::wstring temp = target + L".tmp";
+        const HANDLE h = CreateFileW(
+            temp.c_str(), GENERIC_WRITE, 0, nullptr,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+        if (h == INVALID_HANDLE_VALUE)
+            return false;
+
+        DWORD written = 0;
+        const BOOL ok = WriteFile(
+            h, contents.data(), static_cast<DWORD>(contents.size()),
+            &written, nullptr);
+        CloseHandle(h);
+
+        if (!ok || written != contents.size() ||
+            !MoveFileExW(temp.c_str(), target.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        {
+            DeleteFileW(temp.c_str());
+            return false;
+        }
+
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
+    // Serialize the station object as a one-element JSON array.
+    // -------------------------------------------------------------------------
+
     void write_json(const json& value, abort_callback& abort)
     {
         abort.check();
 
         const std::string contents =
-            json::array({ value }).dump(4) + "\n";
+            json::array({ value }).dump(4, ' ', false, json::error_handler_t::replace) + "\n";
 
+        if (write_json_atomic(contents, abort))
+            return;
+
+        // Fallback: overwrite the existing .utag in place.
         service_ptr_t<file> output;
 
-        // Overwrites the existing .utag in place.
+
         filesystem::g_open_write_new(
             output,
             m_path.c_str(),
@@ -1535,116 +1692,116 @@ static std::string wide_to_utf8(const std::wstring& text)
     return result;
 }
 
-// Scrollable, read-only results window for the Create utag files command.
-namespace
-{
-    constexpr int kUtagResultsEditId = 5101;
-    constexpr int kUtagResultsCloseId = 5102;
 
-    static LRESULT CALLBACK utag_results_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
-    {
-        switch (msg)
-        {
-        case WM_SIZE:
-        {
-            const int width = LOWORD(lp);
-            const int height = HIWORD(lp);
-            HWND edit = GetDlgItem(hwnd, kUtagResultsEditId);
-            HWND closeButton = GetDlgItem(hwnd, kUtagResultsCloseId);
-            if (edit) MoveWindow(edit, 12, 12, (std::max)(100, width - 24), (std::max)(100, height - 60), TRUE);
-            if (closeButton) MoveWindow(closeButton, (std::max)(12, width - 100), (std::max)(12, height - 40), 88, 28, TRUE);
-            return 0;
-        }
-        case WM_COMMAND:
-            if (LOWORD(wp) == kUtagResultsCloseId || LOWORD(wp) == IDOK)
-            {
-                DestroyWindow(hwnd);
-                return 0;
-            }
-            break;
-        case WM_CLOSE:
-            DestroyWindow(hwnd);
-            return 0;
-        }
-        return DefWindowProcW(hwnd, msg, wp, lp);
-    }
 
-    static void show_utag_results(HWND owner, const std::string& text)
-    {
-        static const wchar_t* className = L"FooUtagResultsWindow";
-        static bool registered = false;
-        if (!registered)
-        {
-            WNDCLASSW wc = {};
-            wc.lpfnWndProc = utag_results_wndproc;
-            wc.hInstance = GetModuleHandleW(nullptr);
-            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-            wc.lpszClassName = className;
-            if (RegisterClassW(&wc) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS)
-                registered = true;
-        }
-        if (!registered)
-        {
-            const std::wstring wide = utf8_to_wide(text);
-            MessageBoxW(owner, wide.c_str(), L"Create utag files", MB_OK | MB_ICONINFORMATION);
-            return;
-        }
 
-        HWND hwnd = CreateWindowExW(
-            WS_EX_DLGMODALFRAME, className, L"Create utag files - Results",
-            WS_CAPTION | WS_SYSMENU | WS_SIZEBOX | WS_VISIBLE,
-            CW_USEDEFAULT, CW_USEDEFAULT, 760, 560, owner, nullptr,
-            GetModuleHandleW(nullptr), nullptr);
-        if (!hwnd)
-        {
-            const std::wstring wide = utf8_to_wide(text);
-            MessageBoxW(owner, wide.c_str(), L"Create utag files", MB_OK | MB_ICONINFORMATION);
-            return;
-        }
 
-        HWND edit = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_LEFT |
-            ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_READONLY,
-            12, 12, 720, 480, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUtagResultsEditId)),
-            GetModuleHandleW(nullptr), nullptr);
-        CreateWindowExW(0, L"BUTTON", L"Close",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            660, 500, 88, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUtagResultsCloseId)),
-            GetModuleHandleW(nullptr), nullptr);
-        if (edit)
-        {
-            const std::wstring wide = utf8_to_wide(text);
-            SetWindowTextW(edit, wide.c_str());
-            SendMessageW(edit, EM_SETSEL, 0, 0);
-        }
 
-        if (owner) EnableWindow(owner, FALSE);
-        ShowWindow(hwnd, SW_SHOW);
-        UpdateWindow(hwnd);
-        MSG msg;
-        while (IsWindow(hwnd))
-        {
-            const BOOL got = GetMessageW(&msg, nullptr, 0, 0);
-            if (got <= 0)
-            {
-                if (got == 0) PostQuitMessage(static_cast<int>(msg.wParam));
-                break;
-            }
-            if (!IsDialogMessageW(hwnd, &msg))
-            {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        }
-        if (owner)
-        {
-            EnableWindow(owner, TRUE);
-            SetActiveWindow(owner);
-        }
-    }
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // -----------------------------------------------------------------------------
 // Playlist context-menu command: create one .utag file per selected track.
@@ -1680,6 +1837,24 @@ static std::string find_track_metadata(
     return {};
 }
 
+// CON, PRN, AUX, NUL, COM1-9, LPT1-9 are device names on Windows, with or
+// without an extension: "NUL.utag" would silently write nowhere.
+static bool is_reserved_windows_name(const std::wstring& name)
+{
+    std::wstring stem = name.substr(0, name.find(L'.'));
+    while (!stem.empty() && stem.back() == L' ')
+        stem.pop_back();
+
+    static const wchar_t* const reserved[] = { L"CON", L"PRN", L"AUX", L"NUL" };
+    for (const wchar_t* r : reserved)
+        if (_wcsicmp(stem.c_str(), r) == 0) return true;
+
+    return stem.size() == 4 &&
+        (_wcsnicmp(stem.c_str(), L"COM", 3) == 0 ||
+            _wcsnicmp(stem.c_str(), L"LPT", 3) == 0) &&
+        stem[3] >= L'1' && stem[3] <= L'9';
+}
+
 static std::wstring make_safe_filename_base(const std::string& label)
 {
     std::wstring result = utf8_to_wide(label);
@@ -1712,6 +1887,9 @@ static std::wstring make_safe_filename_base(const std::string& label)
 
     if (result.empty())
         result = L"Station";
+
+    if (is_reserved_windows_name(result))
+        result.insert(0, L"_");
 
     return result;
 }
@@ -2016,7 +2194,7 @@ static void create_utag_files_in_folder(
             }
 
             station["@"] = url;
-            const std::string contents = json::array({ station }).dump(4) + "\n";
+            const std::string contents = json::array({ station }).dump(4, ' ', false, json::error_handler_t::replace) + "\n";
             const bool saved = write_unique_utag(folder, safeName, contents, outputPath);
             if (saved)
             {
@@ -2364,16 +2542,16 @@ namespace
 
         dialog_template t;
         t.begin(WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER,
-            0, 0, 260, 96, L"Add internet radio url and create utag", L"Segoe UI", 9);
+            0, 0, 260, 110, L"Add internet radio url and create utag", L"Segoe UI", 9);
         t.item(kStatic, SS_LEFT, 8, 8, 244, 10, 0xFFFF, L"Station URL:");
         t.item(kEdit, ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 8, 20, 244, 13,
             kIdUrlEdit, L"");
-        t.item(kStatic, SS_LEFT, 8, 40, 244, 10, 0xFFFF, L"Station name (optional, looked up from the stream if empty):");
+        t.item(kStatic, SS_LEFT, 8, 40, 244, 10, 0xFFFF, L"Station name (optional; read from stream if empty):");
         t.item(kEdit, ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 8, 52, 244, 13,
             kIdNameEdit, L"");
-        t.item(kStatic, SS_LEFT, 8, 77, 136, 10, kIdStatus, L"");
-        t.item(kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 148, 74, 50, 14, IDOK, L"Create");
-        t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 202, 74, 50, 14, IDCANCEL, L"Cancel");
+        t.item(kStatic, SS_LEFT, 8, 70, 244, 10, kIdStatus, L"");
+        t.item(kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 148, 88, 50, 14, IDOK, L"Create");
+        t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 202, 88, 50, 14, IDCANCEL, L"Cancel");
 
         url_prompt_state state;
         const INT_PTR result = DialogBoxIndirectParamW(
@@ -3286,7 +3464,7 @@ public:
                 json station = json::object();
                 station["name"] = label;
                 station["@"] = url;
-                const std::string contents = json::array({ station }).dump(4) + "\n";
+                const std::string contents = json::array({ station }).dump(4, ' ', false, json::error_handler_t::replace) + "\n";
 
                 if (write_unique_utag(folder, make_safe_filename_base(label),
                     contents, outputPath))
@@ -3392,15 +3570,15 @@ g_create_utag_context_menu_factory;
 // sidecar exists; later queries can use it. If it is not present, preserve the
 // referenced-file fallback. The built-in viewer may cache artwork and may need
 // its own refresh/track-change before it asks again.
-// True for plain paths and file:// references. Remote streams (http, https,
-// etc.) have no length and no embedded artwork, so artwork readers must not
-// be pointed at them (doing so throws "Length of object is unknown").
-static bool utag_is_local_reference(const std::string& ref)
-{
-    if (ref.empty()) return false;
-    if (ref.rfind("file://", 0) == 0) return true;
-    return ref.find("://") == std::string::npos;
-}
+
+
+
+
+
+
+
+
+
 
 class utag_album_art_extractor_instance : public album_art_extractor_instance
 {
@@ -3429,8 +3607,9 @@ public:
             }
         }
 
-        // Only local references can hold embedded artwork.
-        if (!utag_is_local_reference(m_reference))
+        // Only local, non-.utag references can hold embedded artwork. Remote
+        // streams have no length ("Length of object is unknown").
+        if (!is_local_file_reference(m_reference) || reference_is_utag(m_reference))
             throw exception_album_art_not_found();
 
         try
@@ -3504,16 +3683,16 @@ public:
             const std::string url = faviconIt->get<std::string>();
             if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0)
             {
-                std::string extension = ".ico";
-                const size_t query = url.find_first_of("?#");
-                const std::string urlPath = url.substr(0, query);
-                const size_t dot = urlPath.find_last_of('.');
-                const size_t slash = urlPath.find_last_of('/');
-                if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
-                {
-                    const std::string candidate = urlPath.substr(dot);
-                    if (candidate.size() <= 6) extension = candidate;
-                }
+                const std::string extension = favicon_extension_for_url(url);
+
+
+
+
+
+
+
+
+
 
                 std::string nativePath = to_native_windows_path(path);
                 const size_t pathSlash = nativePath.find_last_of("\\/");
@@ -3626,7 +3805,7 @@ public:
         abort.check();
 
         // Remote streams have no length and cannot hold editable artwork.
-        if (!utag_is_local_reference(reference)) {
+        if (!is_local_file_reference(reference) || reference_is_utag(reference)) {
             throw exception_io_data();
         }
 
