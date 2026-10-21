@@ -14,8 +14,10 @@ The `.utag` file stores the stream URL and metadata. foobar2000 can scan and tag
 - **Add a station by URL:** **File → Add internet radio url and create utag** asks for a stream URL (and an optional name) and creates the `.utag` file in the default folder. If no name is entered, it is looked up from the stream. Track is sent to the "New utags" playlist.
 - **Import from Radio Browser:** **File → Import stations from Radio Browser...** downloads stations from the [Radio Browser](https://www.radio-browser.info/) directory and creates one `.utag` file per station, in a new folder named after the search.																																																														
 - **Results popup:** every created or skipped entry lists the stream URL (`@`) and the output path; errors list the source URL and the reason.
-- **Optional stream handoff:** an Advanced preference can reuse the running decoder when the playing item is reopened after retagging, helping avoid a reconnect and audible pause.
-- **Optional favicon download during playback:** an Advanced preference Optional favicon download during playback, using the favicon URL stored in the .utag JSON.
+
+- **Optional stream handoff:** an Advanced preference can reuse the running decoder when the playing item is reopened after retagging, helping avoid a reconnect and audible pause. Preferences → Tools → Utag Input
+- **Optional favicon download during playback:** an Advanced preference Optional favicon download during playback, using the favicon URL stored in the .utag JSON. Preferences → Tools → Utag Input
+
 
 ## `.utag` file format
 
@@ -131,7 +133,7 @@ The component provides this Advanced preference:
 
 **utag: reuse stream when playing item is retagged**
 
-It is located under **Preferences → Advanced → Tools** and is enabled by default.
+It is located under **Preferences → Tools → Utag Input** and is enabled by default.
 
 When enabled, the component temporarily retains the current decoder when an input instance closes during playback. If a new instance for the same stream URL opens within approximately two seconds, it can take over the existing decoder rather than opening a new stream connection. If the decoder is not reused within the handoff window, it is released shortly afterward.
 
