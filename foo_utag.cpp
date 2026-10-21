@@ -2197,14 +2197,19 @@ namespace
     constexpr int kIdNameEdit = 1002;
     constexpr int kIdStatus = 1003;
 
+    // The window is modeless (foobar2000 stays usable while it is open), so
+    // its state lives on the heap and is freed in WM_NCDESTROY.
     struct url_prompt_state
     {
-        std::wstring url;
-        std::wstring name;
-        modal_dialog_scope scope;
         // Follows foobar2000's own dark mode setting (no-op on pre-2.0 builds).
         fb2k::CCoreDarkModeHooks darkHooks;
     };
+
+    HWND g_stationPromptWnd = nullptr; // the one open window, if any
+
+    // Defined further down: creates the .utag in the background.
+    void start_station_creation(const std::wstring& url, const std::wstring& name,
+        const std::wstring& folder);
 
     std::wstring read_dialog_text(HWND dlg, int id)
     {
@@ -2240,11 +2245,9 @@ namespace
         {
             state = reinterpret_cast<url_prompt_state*>(lp);
             SetWindowLongPtrW(dlg, DWLP_USER, lp);
-            if (state->scope.can_create())
-                state->scope.initialize(dlg);
-
             // Dark mode for the dialog and all of its controls.
             state->darkHooks.AddDialogWithControls(dlg);
+            modeless_dialog_manager::g_add(dlg); // Tab / Enter / Esc keys
 
             SetFocus(GetDlgItem(dlg, kIdUrlEdit));
             return FALSE; // focus set manually
@@ -2256,7 +2259,7 @@ namespace
 
             if (id == IDCANCEL)
             {
-                EndDialog(dlg, IDCANCEL);
+                DestroyWindow(dlg);
                 return TRUE;
             }
 
@@ -2273,14 +2276,37 @@ namespace
                     return TRUE;
                 }
 
-                state->url = url;
-                state->name = trim_wide(read_dialog_text(dlg, kIdNameEdit));
-                EndDialog(dlg, IDOK);
+                const std::wstring name = trim_wide(read_dialog_text(dlg, kIdNameEdit));
+
+                // May ask for the default folder the first time; keep this
+                // window open if that is cancelled.
+                std::wstring folder;
+                EnableWindow(dlg, FALSE);
+                const bool haveFolder = get_default_folder(folder, false);
+                EnableWindow(dlg, TRUE);
+
+                if (!haveFolder)
+                    return TRUE;
+
+                DestroyWindow(dlg);
+                start_station_creation(url, name, folder);
                 return TRUE;
             }
 
             break;
         }
+
+        case WM_CLOSE:
+            DestroyWindow(dlg);
+            return TRUE;
+
+        case WM_NCDESTROY:
+            modeless_dialog_manager::g_remove(dlg);
+            SetWindowLongPtrW(dlg, DWLP_USER, 0);
+            if (g_stationPromptWnd == dlg)
+                g_stationPromptWnd = nullptr;
+            delete state;
+            break;
 
         default:
             break;
@@ -2354,8 +2380,16 @@ namespace
         WORD count_ = 0;
     };
 
-    bool prompt_for_station(HWND owner, std::wstring& url, std::wstring& name)
+    // Opens the (modeless) window, or brings the open one to the front.
+    void open_station_dialog(HWND owner)
     {
+        if (g_stationPromptWnd != nullptr && IsWindow(g_stationPromptWnd))
+        {
+            ShowWindow(g_stationPromptWnd, SW_RESTORE);
+            SetForegroundWindow(g_stationPromptWnd);
+            return;
+        }
+
         constexpr WORD kButton = 0x0080, kEdit = 0x0081, kStatic = 0x0082;
 
         dialog_template t;
@@ -2371,17 +2405,20 @@ namespace
         t.item(kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 148, 88, 50, 14, IDOK, L"Create");
         t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 202, 88, 50, 14, IDCANCEL, L"Cancel");
 
-        url_prompt_state state;
-        const INT_PTR result = DialogBoxIndirectParamW(
+        auto* state = new url_prompt_state;
+        const HWND dlg = CreateDialogIndirectParamW(
             core_api::get_my_instance(), t.data(), owner,
-            url_prompt_proc, reinterpret_cast<LPARAM>(&state));
+            url_prompt_proc, reinterpret_cast<LPARAM>(state));
 
-        if (result != IDOK)
-            return false;
+        if (dlg == nullptr)
+        {
+            delete state;
+            return;
+        }
 
-        url = state.url;
-        name = state.name;
-        return true;
+        g_stationPromptWnd = dlg;
+        ShowWindow(dlg, SW_SHOW);
+        SetForegroundWindow(dlg);
     }
 
     // -------------------------------------------------------------------------
@@ -2618,103 +2655,273 @@ namespace
         bool finished = false; // false when the user aborted the lookup
     };
 
-    // Connects to the stream just long enough to read its response headers
-    // and pulls the station name out of "icy-name" / "ice-name".
-    class station_probe_task : public threaded_process_callback
+    std::string trim_ascii_text(const char* text)
     {
-    public:
-        station_probe_task(const std::string& url,
-            std::shared_ptr<station_probe_result> out)
-            : m_url(url), m_out(std::move(out)) {
-        }
+        std::string result = text != nullptr ? text : "";
+        const char* ws = " \t\r\n";
+        const size_t first = result.find_first_not_of(ws);
+        if (first == std::string::npos)
+            return {};
+        const size_t last = result.find_last_not_of(ws);
+        return result.substr(first, last - first + 1);
+    }
 
-        void run(threaded_process_status&, abort_callback& abort) override
-        {
-            try
+    // Connects to the stream just long enough to read its response headers
+    // and pulls the station name out of "icy-name" / "ice-name". Safe to call
+    // from a worker thread. `out.error` is set when the server is unreachable;
+    // throws exception_aborted when the user aborts.
+    void probe_station(const std::string& url, abort_callback& abort,
+        station_probe_result& out)
+    {
+        const auto fail = [&out](const char* what)
             {
-                static_api_ptr_t<http_client> client;
-                auto request = client->create_request("GET");
-                request->add_header("Icy-MetaData: 1");
+                out.error = (what != nullptr && *what != '\0')
+                    ? what
+                    : "no response from the server";
+                out.finished = true;
+            };
 
-                // run_ex() hands back the stream as a file object; the HTTP
-                // response headers are exposed through its http_reply service.
-                auto stream = request->run_ex(m_url.c_str(), abort);
+        try
+        {
+            static_api_ptr_t<http_client> client;
+            auto request = client->create_request("GET");
+            request->add_header("Icy-MetaData: 1");
 
-                http_reply::ptr reply;
-                if (stream->service_query_t(reply))
+            // run_ex() hands back the stream as a file object; the HTTP
+            // response headers are exposed through its http_reply service.
+            auto stream = request->run_ex(url.c_str(), abort);
+
+            http_reply::ptr reply;
+            if (stream->service_query_t(reply))
+            {
+                static const char* const headers[] =
+                { "icy-name", "ice-name", "Icy-Name", "Ice-Name" };
+
+                for (const char* header : headers)
                 {
-                    static const char* const headers[] =
-                    { "icy-name", "ice-name", "Icy-Name", "Ice-Name" };
+                    pfc::string8 value;
+                    reply->get_http_header(header, value);
 
-                    for (const char* header : headers)
+                    const std::string text = trim_ascii_text(value.get_ptr());
+                    if (!text.empty())
                     {
-                        pfc::string8 value;
-                        reply->get_http_header(header, value);
-
-                        const std::string text = trim_ascii(value.get_ptr());
-                        if (!text.empty())
-                        {
-                            m_out->name = text;
-                            break;
-                        }
+                        out.name = text;
+                        break;
                     }
                 }
+            }
 
-                m_out->finished = true;
+            out.finished = true;
+        }
+        catch (const exception_aborted&)
+        {
+            throw; // user pressed Abort
+        }
+        catch (const std::exception& e) // also covers pfc::exception
+        {
+            fail(e.what());
+        }
+        catch (...)
+        {
+            fail("");
+        }
+    }
+
+    // Creates the .utag in the background so foobar2000 stays usable while the
+    // stream is asked for its name. The playlist and the results popup are
+    // handled in on_done(), which runs on the main thread.
+    class add_station_task : public threaded_process_callback
+    {
+    public:
+        add_station_task(std::wstring url, std::wstring name, std::wstring folder)
+            : m_wideUrl(std::move(url)), m_wideName(std::move(name)),
+            m_folder(std::move(folder)) {
+        }
+
+        void run(threaded_process_status& status, abort_callback& abort) override
+        {
+            m_logEntries.emplace_back("Add internet radio url and create utag - Results");
+            m_logEntries.emplace_back("Output folder: " + wide_to_utf8(m_folder));
+            m_logEntries.emplace_back(std::string(64, '-'));
+
+            try
+            {
+                do_create(status, abort);
             }
             catch (const exception_aborted&)
             {
-                throw; // user pressed Abort
+                throw; // reported through on_done(aborted = true)
             }
-            catch (const std::exception& e) // also covers pfc::exception
+            catch (const std::exception& e)
             {
-                fail(e.what());
+                ++m_failed;
+                std::string entry = "[ERROR] " + (m_label.empty() ? m_url : m_label);
+                entry += "\n        Source: " + m_url;
+                if (!m_outputPath.empty()) entry += "\n        Output: " + m_outputPath;
+                entry += "\n        Reason: ";
+                entry += e.what();
+                m_logEntries.emplace_back(std::move(entry));
             }
             catch (...)
             {
-                fail("");
+                ++m_failed;
+                std::string entry = "[ERROR] " + (m_label.empty() ? m_url : m_label);
+                entry += "\n        Source: " + m_url + "\n        Reason: Unknown error.";
+                if (!m_outputPath.empty()) entry += "\n        Output: " + m_outputPath;
+                m_logEntries.emplace_back(std::move(entry));
             }
         }
 
-    private:
-        void fail(const char* what)
+        void on_done(HWND, bool aborted) override
         {
-            m_out->error = (what != nullptr && *what != '\0')
-                ? what
-                : "no response from the server";
-            m_out->finished = true;
+            static const char* const kTitle = "Add internet radio url and create utag";
+            const HWND owner = core_api::get_main_window();
+
+            if (aborted)
+            {
+                popup_message::g_show("Station lookup was cancelled; no file created.",
+                    kTitle, popup_message::icon_information);
+                return;
+            }
+
+            if (m_created > 0 && !m_outputPath.empty())
+            {
+                try
+                {
+                    static_api_ptr_t<playlist_manager> playlists;
+                    const std::string playlistName = "New utags";
+
+                    // Make canonical path for the created file.
+                    pfc::string8 canonicalPath;
+                    filesystem::g_get_canonical_path(m_outputPath.c_str(), canonicalPath);
+
+                    pfc::list_t<const char*> locations;
+                    locations.add_item(canonicalPath.get_ptr());
+
+                    // find_or_create_playlist returns index or pfc_infinite on failure.
+                    const t_size plIndex = playlists->find_or_create_playlist(playlistName.c_str(), playlistName.length());
+                    if (plIndex != pfc_infinite)
+                    {
+                        playlists->playlist_add_locations(plIndex, locations, true, owner);
+                        playlists->set_active_playlist(plIndex);
+                    }
+                    else
+                    {
+                        // Fallback: try create_playlist if find_or_create failed.
+                        const t_size createdIndex = playlists->create_playlist(playlistName.c_str(), playlistName.length(), pfc_infinite);
+                        if (createdIndex != pfc_infinite)
+                        {
+                            playlists->playlist_add_locations(createdIndex, locations, true, owner);
+                            playlists->set_active_playlist(createdIndex);
+                        }
+                    }
+                }
+                catch (...)
+                {
+                    // Don't treat playlist failures as fatal for utag creation.
+                }
+            }
+
+            m_logEntries.emplace_back(std::string(64, '-'));
+            std::ostringstream summary;
+            summary << "Summary: Created " << m_created << " | Skipped " << m_skipped
+                << " | Failed " << m_failed;
+            m_logEntries.emplace_back(summary.str());
+
+            std::ostringstream results;
+            for (size_t i = 0; i < m_logEntries.size(); ++i)
+            {
+                if (i != 0) results << "\r\n\r\n";
+                results << m_logEntries[i];
+            }
+
+            const std::string resultsText = results.str();
+            popup_message::g_show(resultsText.c_str(), kTitle, popup_message::icon_information);
         }
 
-        static std::string trim_ascii(const char* text)
+    private:
+        // Worker thread: no UI, playlist or config access in here.
+        void do_create(threaded_process_status& status, abort_callback& abort)
         {
-            std::string result = text != nullptr ? text : "";
-            const char* ws = " \t\r\n";
-            const size_t first = result.find_first_not_of(ws);
-            if (first == std::string::npos)
-                return {};
-            const size_t last = result.find_last_not_of(ws);
-            return result.substr(first, last - first + 1);
+            m_url = wide_to_utf8(m_wideUrl);
+            std::string name = wide_to_utf8(m_wideName);
+            bool probed = false;
+
+            // No name typed in: ask the stream for it. An unreachable server
+            // (or an abort) stops here and nothing is created.
+            if (name.empty() && !is_utag_path(m_url))
+            {
+                status.set_item("Looking up station name...");
+
+                station_probe_result probe;
+                probe_station(m_url, abort, probe);
+
+                if (!probe.error.empty())
+                    throw std::runtime_error("Could not reach the stream: " + probe.error);
+
+                name = probe.name;
+                probed = !name.empty();
+            }
+
+            m_label = name.empty() ? station_label_from_url(m_url) : name;
+
+            if (is_utag_path(m_url))
+            {
+                ++m_skipped;
+                m_logEntries.emplace_back(
+                    "[SKIPPED] That is a .utag file, not a stream URL: " + m_url);
+                return;
+            }
+
+            json station = json::object();
+            station["name"] = m_label;
+            station["@"] = m_url;
+            const std::string contents = json::array({ station }).dump(4, ' ', false, json::error_handler_t::replace) + "\n";
+
+            if (write_unique_utag(m_folder, make_safe_filename_base(m_label),
+                contents, m_outputPath))
+            {
+                ++m_created;
+                m_logEntries.emplace_back("[CREATED] " + m_label +
+                    (probed ? " (name from stream)" : "") +
+                    "\n          @  : " + m_url +
+                    "\n          -> " + m_outputPath);
+            }
+            else
+            {
+                ++m_skipped;
+                m_logEntries.emplace_back("[SKIPPED] " + m_label +
+                    "\n          @  : " + m_url +
+                    "\n          -> Tried 9999 filename variants; no available filename.");
+            }
         }
+
+        std::wstring m_wideUrl;
+        std::wstring m_wideName;
+        std::wstring m_folder;
 
         std::string m_url;
-        std::shared_ptr<station_probe_result> m_out;
+        std::string m_label;
+        std::string m_outputPath;
+        std::vector<std::string> m_logEntries;
+        unsigned m_created = 0;
+        unsigned m_skipped = 0;
+        unsigned m_failed = 0;
     };
 
-    // Looks the station up on the stream. `error` is set when the server is
-    // unreachable; `finished` stays false when the user aborts.
-    station_probe_result probe_station_name(HWND owner, const std::string& url)
+    void start_station_creation(const std::wstring& url, const std::wstring& name,
+        const std::wstring& folder)
     {
-        const auto result = std::make_shared<station_probe_result>();
         service_ptr_t<threaded_process_callback> task =
-            new service_impl_t<station_probe_task>(url, result);
+            new service_impl_t<add_station_task>(url, name, folder);
 
-        threaded_process::g_run_modal(
+        // Modeless: foobar2000 stays usable; the progress window only shows up
+        // when the lookup takes a moment.
+        threaded_process::g_run_modeless(
             task,
             threaded_process::flag_show_abort | threaded_process::flag_show_delayed,
-            owner,
+            core_api::get_main_window(),
             "Looking up station name...");
-
-        return *result;
     }
 }
 
@@ -2754,12 +2961,14 @@ namespace
         long limit = 100;
     };
 
+    // The search window is modeless (foobar2000 stays usable while it is
+    // open), so its state lives on the heap and is freed in WM_NCDESTROY.
     struct radio_prompt_state
     {
-        radio_query query;
-        modal_dialog_scope scope;
         fb2k::CCoreDarkModeHooks darkHooks;
     };
+
+    HWND g_radioPromptWnd = nullptr; // the one open search window, if any
 
     bool is_ascii_letter(wchar_t c)
     {
@@ -2783,6 +2992,7 @@ namespace
 
     bool choose_radio_browser_tag(HWND owner, std::string& selected);
     bool choose_radio_browser_country(HWND owner, std::string& selected);
+    void start_radio_import(const radio_query& query, const std::wstring& parentFolder);
 
 
     INT_PTR CALLBACK radio_prompt_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
@@ -2797,10 +3007,8 @@ namespace
             state = reinterpret_cast<radio_prompt_state*>(lp);
             SetWindowLongPtrW(dlg, DWLP_USER, lp);
 
-            if (state->scope.can_create())
-                state->scope.initialize(dlg);
-
             state->darkHooks.AddDialogWithControls(dlg);
+            modeless_dialog_manager::g_add(dlg); // Tab / Enter / Esc keys
 
             SetFocus(GetDlgItem(dlg, kIdRbName));
             return FALSE; // focus set manually
@@ -2812,7 +3020,7 @@ namespace
 
             if (id == IDCANCEL)
             {
-                EndDialog(dlg, IDCANCEL);
+                DestroyWindow(dlg);
                 return TRUE;
             }
 
@@ -2897,24 +3105,49 @@ namespace
                     return TRUE;
                 }
 
-                state->query.name =
+                radio_query query;
+
+                query.name =
                     wide_to_utf8(trim_wide(
                         read_dialog_text(dlg, kIdRbName)));
 
-                state->query.tag =
+                query.tag =
                     wide_to_utf8(trim_wide(
                         read_dialog_text(dlg, kIdRbTag)));
 
-                state->query.countryCode = wide_to_utf8(country);
-                state->query.minBitrate = minBitrate;
-                state->query.limit = limit;
+                query.countryCode = wide_to_utf8(country);
+                query.minBitrate = minBitrate;
+                query.limit = limit;
 
-                EndDialog(dlg, IDOK);
+                // May ask for the default folder the first time; keep this
+                // window open if that is cancelled.
+                std::wstring parentFolder;
+                EnableWindow(dlg, FALSE);
+                const bool haveFolder = get_default_folder(parentFolder, false);
+                EnableWindow(dlg, TRUE);
+
+                if (!haveFolder)
+                    return TRUE;
+
+                DestroyWindow(dlg);
+                start_radio_import(query, parentFolder);
                 return TRUE;
             }
 
             break;
         }
+
+        case WM_CLOSE:
+            DestroyWindow(dlg);
+            return TRUE;
+
+        case WM_NCDESTROY:
+            modeless_dialog_manager::g_remove(dlg);
+            SetWindowLongPtrW(dlg, DWLP_USER, 0);
+            if (g_radioPromptWnd == dlg)
+                g_radioPromptWnd = nullptr;
+            delete state;
+            break;
 
         default:
             break;
@@ -2924,8 +3157,16 @@ namespace
     }
 
 
-    bool prompt_for_radio_query(HWND owner, radio_query& query)
+    // Opens the (modeless) search window, or brings the open one to the front.
+    void open_radio_query_dialog(HWND owner)
     {
+        if (g_radioPromptWnd != nullptr && IsWindow(g_radioPromptWnd))
+        {
+            ShowWindow(g_radioPromptWnd, SW_RESTORE);
+            SetForegroundWindow(g_radioPromptWnd);
+            return;
+        }
+
         constexpr WORD kButton = 0x0080;
         constexpr WORD kEdit = 0x0081;
         constexpr WORD kStatic = 0x0082;
@@ -2994,20 +3235,24 @@ namespace
         t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP,
             240, 120, 52, 14, IDCANCEL, L"Cancel");
 
-        radio_prompt_state state;
+        auto* state = new radio_prompt_state;
 
-        const INT_PTR result = DialogBoxIndirectParamW(
+        const HWND dlg = CreateDialogIndirectParamW(
             core_api::get_my_instance(),
             t.data(),
             owner,
             radio_prompt_proc,
-            reinterpret_cast<LPARAM>(&state));
+            reinterpret_cast<LPARAM>(state));
 
-        if (result != IDOK)
-            return false;
+        if (dlg == nullptr)
+        {
+            delete state;
+            return;
+        }
 
-        query = state.query;
-        return true;
+        g_radioPromptWnd = dlg;
+        ShowWindow(dlg, SW_SHOW);
+        SetForegroundWindow(dlg);
     }
 
     std::string percent_encode(const std::string& text)
@@ -3061,7 +3306,77 @@ namespace
         bool finished = false; // false when the user aborted
     };
 
-    // Downloads the station list, trying the Radio Browser mirrors in turn.
+    // Downloads `path`, trying the Radio Browser mirrors in turn. Returns false
+    // with `error` set when none answers; throws exception_aborted when the
+    // user aborts. Safe to call from a worker thread.
+    bool radio_download(const std::string& path, abort_callback& abort,
+        std::string& body, std::string& error)
+    {
+        static const char* const servers[] =
+        {
+            "https://de1.api.radio-browser.info",
+            "https://de2.api.radio-browser.info",
+            "https://nl1.api.radio-browser.info",
+            "https://at1.api.radio-browser.info",
+        };
+
+        std::string lastError;
+
+        for (const char* server : servers)
+        {
+            try
+            {
+                static_api_ptr_t<http_client> client;
+                auto request = client->create_request("GET");
+                request->add_header("Accept: application/json");
+
+                const std::string url = std::string(server) + path;
+                auto stream = request->run_ex(url.c_str(), abort);
+
+                constexpr size_t kMaxResponse = static_cast<size_t>(64) * 1024 * 1024;
+
+                std::string data;
+                std::vector<char> buffer(16384); // heap, not stack
+                for (;;)
+                {
+                    abort.check();
+                    const t_size got = stream->read(buffer.data(), buffer.size(), abort);
+                    if (got == 0)
+                        break;
+
+                    data.append(buffer.data(), static_cast<size_t>(got));
+                    if (data.size() > kMaxResponse)
+                        throw std::runtime_error("The response is too large.");
+                }
+
+                if (data.empty())
+                {
+                    lastError = "empty response";
+                    continue;
+                }
+
+                body = std::move(data);
+                return true;
+            }
+            catch (const exception_aborted&)
+            {
+                throw; // user pressed Abort
+            }
+            catch (const std::exception& e) // also covers pfc::exception
+            {
+                lastError = e.what();
+            }
+            catch (...)
+            {
+                lastError = "no response from the server";
+            }
+        }
+
+        error = lastError.empty() ? "no response from the server" : lastError;
+        return false;
+    }
+
+    // Short modal download used by the tag and country pickers.
     class radio_fetch_task : public threaded_process_callback
     {
     public:
@@ -3071,68 +3386,14 @@ namespace
 
         void run(threaded_process_status&, abort_callback& abort) override
         {
-            static const char* const servers[] =
-            {
-                "https://de1.api.radio-browser.info",
-                "https://de2.api.radio-browser.info",
-                "https://nl1.api.radio-browser.info",
-                "https://at1.api.radio-browser.info",
-            };
+            std::string body;
+            std::string error;
 
-            std::string lastError;
+            if (radio_download(m_path, abort, body, error))
+                m_out->body = std::move(body);
+            else
+                m_out->error = std::move(error);
 
-            for (const char* server : servers)
-            {
-                try
-                {
-                    static_api_ptr_t<http_client> client;
-                    auto request = client->create_request("GET");
-                    request->add_header("Accept: application/json");
-
-                    const std::string url = std::string(server) + m_path;
-                    auto stream = request->run_ex(url.c_str(), abort);
-
-                    constexpr size_t kMaxResponse = static_cast<size_t>(64) * 1024 * 1024;
-
-                    std::string body;
-                    std::vector<char> buffer(16384); // heap, not stack
-                    for (;;)
-                    {
-                        abort.check();
-                        const t_size got = stream->read(buffer.data(), buffer.size(), abort);
-                        if (got == 0)
-                            break;
-
-                        body.append(buffer.data(), static_cast<size_t>(got));
-                        if (body.size() > kMaxResponse)
-                            throw std::runtime_error("The response is too large.");
-                    }
-
-                    if (body.empty())
-                    {
-                        lastError = "empty response";
-                        continue;
-                    }
-
-                    m_out->body = std::move(body);
-                    m_out->finished = true;
-                    return;
-                }
-                catch (const exception_aborted&)
-                {
-                    throw; // user pressed Abort
-                }
-                catch (const std::exception& e) // also covers pfc::exception
-                {
-                    lastError = e.what();
-                }
-                catch (...)
-                {
-                    lastError = "no response from the server";
-                }
-            }
-
-            m_out->error = lastError.empty() ? "no response from the server" : lastError;
             m_out->finished = true;
         }
 
@@ -3690,222 +3951,291 @@ namespace
         return entry;
     }
 
+    // Runs the whole import in the background so foobar2000 stays usable:
+    // download, create the folder, write the .utag files. The playlist and the
+    // results popup are done in on_done(), which runs on the main thread.
+    class radio_import_task : public threaded_process_callback
+    {
+    public:
+        radio_import_task(radio_query query, std::wstring parentFolder)
+            : m_query(std::move(query)), m_parent(std::move(parentFolder)) {
+        }
+
+        void run(threaded_process_status& status, abort_callback& abort) override
+        {
+            try
+            {
+                do_import(status, abort);
+            }
+            catch (const exception_aborted&)
+            {
+                throw; // reported through on_done(aborted = true)
+            }
+            catch (const std::exception& e)
+            {
+                m_error = std::string("Import failed: ") + e.what();
+            }
+            catch (...)
+            {
+                m_error = "Import failed: unexpected error.";
+            }
+        }
+
+        void on_done(HWND, bool aborted) override
+        {
+            static const char* const kTitle = "Import stations from Radio Browser";
+            const HWND owner = core_api::get_main_window();
+
+            if (aborted)
+            {
+                std::string text = "Import cancelled; no files created.";
+                if (m_created > 0)
+                {
+                    text = "Import cancelled; " + std::to_string(m_created) +
+                        " file(s) were already created in:\r\n" + wide_to_utf8(m_folder);
+                }
+                popup_message::g_show(text.c_str(), kTitle, popup_message::icon_information);
+                return;
+            }
+
+            if (!m_error.empty())
+            {
+                popup_message::g_show(m_error.c_str(), kTitle, popup_message::icon_error);
+                return;
+            }
+
+            if (!m_info.empty())
+            {
+                popup_message::g_show(m_info.c_str(), kTitle, popup_message::icon_information);
+                return;
+            }
+
+            // Put the new files into a playlist named like the search folder.
+            std::string playlistNote;
+            if (!m_createdPaths.empty())
+            {
+                try
+                {
+                    const size_t slash = m_folder.find_last_of(L"\\/");
+                    const std::string playlistName = wide_to_utf8(
+                        slash == std::wstring::npos ? m_folder : m_folder.substr(slash + 1));
+
+                    std::vector<pfc::string8> canonical;
+                    canonical.reserve(m_createdPaths.size());
+                    for (const auto& path : m_createdPaths)
+                    {
+                        pfc::string8 canonicalPath;
+                        filesystem::g_get_canonical_path(path.c_str(), canonicalPath);
+                        canonical.push_back(canonicalPath);
+                    }
+
+                    pfc::list_t<const char*> locations;
+                    for (const auto& path : canonical)
+                        locations.add_item(path.get_ptr());
+
+                    static_api_ptr_t<playlist_manager> playlists;
+                    const t_size index = playlists->create_playlist(
+                        playlistName.c_str(), playlistName.length(), pfc_infinite);
+                    playlists->set_active_playlist(index);
+                    playlists->playlist_add_locations(index, locations, true, owner);
+
+                    playlistNote = "Playlist: " + playlistName + " (" +
+                        std::to_string(m_createdPaths.size()) + " entries)";
+                }
+                catch (const std::exception& e)
+                {
+                    playlistNote = std::string("Could not create the playlist: ") + e.what();
+                }
+            }
+
+            std::ostringstream results;
+            results << "Import stations from Radio Browser - Results"
+                << "\r\n\r\n" << "Output folder: " << wide_to_utf8(m_folder)
+                << "\r\n" << "Stations returned: " << m_stationCount;
+
+            if (!playlistNote.empty())
+                results << "\r\n" << playlistNote;
+
+            results << "\r\n\r\n" << std::string(64, '-');
+
+            for (const auto& entry : m_logEntries)
+                results << "\r\n\r\n" << entry;
+
+            if (m_loggedCount > kRbMaxDetailedEntries)
+            {
+                results << "\r\n\r\n... and " << (m_loggedCount - kRbMaxDetailedEntries)
+                    << " more (details are shown for the first "
+                    << kRbMaxDetailedEntries << " stations).";
+            }
+
+            results << "\r\n\r\n" << std::string(64, '-')
+                << "\r\n\r\n" << "Summary: Created " << m_created << " | Skipped " << m_skipped
+                << " | Failed " << m_failed;
+
+            const std::string resultsText = results.str();
+            popup_message::g_show(resultsText.c_str(), kTitle, popup_message::icon_information);
+        }
+
+    private:
+        // Worker thread: no UI, playlist or config access in here.
+        void do_import(threaded_process_status& status, abort_callback& abort)
+        {
+            status.set_item("Downloading the station list...");
+
+            std::string body;
+            std::string error;
+            if (!radio_download(build_radio_browser_path(m_query), abort, body, error))
+            {
+                m_error = "Could not fetch stations from Radio Browser:\r\n" + error;
+                return;
+            }
+
+            const json stations = json::parse(body, nullptr, false);
+            body.clear();
+
+            if (stations.is_discarded() || !stations.is_array())
+            {
+                m_error = "Radio Browser returned an unexpected response; no files created.";
+                return;
+            }
+
+            if (stations.empty())
+            {
+                m_info = "No stations matched the search; no folder created.";
+                return;
+            }
+
+            // Every search gets its own folder, named after the search.
+            DWORD folderError = 0;
+            if (!create_search_folder(m_parent, describe_radio_query(m_query), m_folder, folderError))
+            {
+                std::ostringstream message;
+                message << "Could not create a folder in " << wide_to_utf8(m_parent)
+                    << " (Windows error " << folderError << ").";
+                m_error = message.str();
+                return;
+            }
+
+            m_stationCount = stations.size();
+            status.set_item("Creating .utag files...");
+
+            // Stations that repeat a stream URL within this search are skipped.
+            std::set<std::string> knownUrls;
+
+            // Only the first entries are listed in detail; counts cover them all.
+            const auto addLog = [this](std::string text)
+                {
+                    if (m_loggedCount++ < kRbMaxDetailedEntries)
+                        m_logEntries.emplace_back(std::move(text));
+                };
+
+            size_t done = 0;
+
+            for (const auto& station : stations)
+            {
+                abort.check();
+                status.set_progress(done++, stations.size());
+
+                std::string label;
+                std::string url;
+                std::string outputPath;
+
+                try
+                {
+                    if (!station.is_object())
+                        continue;
+
+                    label = json_text(station, "name");
+                    url = json_text(station, "url_resolved");
+                    if (url.empty())
+                        url = json_text(station, "url");
+
+                    const bool httpUrl =
+                        url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+
+                    if (label.empty() || !httpUrl)
+                    {
+                        ++m_skipped;
+                        addLog("[SKIPPED] " + (label.empty() ? std::string("(no name)") : label) +
+                            "\n          No usable name or http(s) stream URL.");
+                        continue;
+                    }
+
+                    if (!knownUrls.insert(url).second)
+                    {
+                        ++m_skipped;
+                        addLog("[SKIPPED] " + label +
+                            "\n          @  : " + url +
+                            "\n          -> Another station in this search already uses this URL.");
+                        continue;
+                    }
+
+                    const std::string contents =
+                        json::array({ radio_station_to_utag(station, label, url) })
+                        .dump(4, ' ', false, json::error_handler_t::replace) + "\n";
+
+                    if (write_unique_utag(m_folder, make_safe_filename_base(label),
+                        contents, outputPath))
+                    {
+                        ++m_created;
+                        m_createdPaths.push_back(outputPath);
+                        addLog("[CREATED] " + label +
+                            "\n          @  : " + url +
+                            "\n          -> " + outputPath);
+                    }
+                    else
+                    {
+                        ++m_skipped;
+                        addLog("[SKIPPED] " + label +
+                            "\n          @  : " + url +
+                            "\n          -> Tried 9999 filename variants; no available filename.");
+                    }
+                }
+                catch (const std::exception& e)
+                {
+                    ++m_failed;
+                    std::string entry = "[ERROR] " + (label.empty() ? url : label);
+                    entry += "\n        Source: " + url;
+                    if (!outputPath.empty()) entry += "\n        Output: " + outputPath;
+                    entry += "\n        Reason: ";
+                    entry += e.what();
+                    addLog(std::move(entry));
+                }
+            }
+        }
+
+        radio_query m_query;
+        std::wstring m_parent;
+
+        std::wstring m_folder;
+        std::string m_error;
+        std::string m_info;
+        size_t m_stationCount = 0;
+        std::vector<std::string> m_logEntries;
+        std::vector<std::string> m_createdPaths; // for the playlist
+        size_t m_loggedCount = 0;
+        unsigned m_created = 0;
+        unsigned m_skipped = 0;
+        unsigned m_failed = 0;
+    };
+
+    void start_radio_import(const radio_query& query, const std::wstring& parentFolder)
+    {
+        service_ptr_t<threaded_process_callback> task =
+            new service_impl_t<radio_import_task>(query, parentFolder);
+
+        // Modeless: a small progress window with an Abort button, while the
+        // rest of foobar2000 stays usable.
+        threaded_process::g_run_modeless(
+            task,
+            threaded_process::flag_show_abort | threaded_process::flag_show_progress,
+            core_api::get_main_window(),
+            "Importing stations from Radio Browser...");
+    }
+
     void import_from_radio_browser(HWND owner)
     {
-        static const char* const kTitle = "Import stations from Radio Browser";
-
-        radio_query query;
-        if (!prompt_for_radio_query(owner, query))
-            return;
-
-        std::wstring parentFolder;
-        if (!get_default_folder(parentFolder, false))
-            return;
-
-        // Download the station list (background task with an Abort button).
-        const auto fetched = std::make_shared<radio_fetch_result>();
-        service_ptr_t<threaded_process_callback> task =
-            new service_impl_t<radio_fetch_task>(build_radio_browser_path(query), fetched);
-
-        threaded_process::g_run_modal(
-            task,
-            threaded_process::flag_show_abort,
-            owner,
-            "Fetching stations from Radio Browser...");
-
-        if (!fetched->error.empty())
-        {
-            const std::string message =
-                "Could not fetch stations from Radio Browser:\r\n" + fetched->error;
-            popup_message::g_show(message.c_str(), kTitle, popup_message::icon_error);
-            return;
-        }
-
-        if (!fetched->finished)
-        {
-            popup_message::g_show("Import cancelled; no files created.", kTitle,
-                popup_message::icon_information);
-            return;
-        }
-
-        const json stations = json::parse(fetched->body, nullptr, false);
-        if (stations.is_discarded() || !stations.is_array())
-        {
-            popup_message::g_show(
-                "Radio Browser returned an unexpected response; no files created.",
-                kTitle, popup_message::icon_error);
-            return;
-        }
-
-        if (stations.empty())
-        {
-            popup_message::g_show("No stations matched the search; no folder created.",
-                kTitle, popup_message::icon_information);
-            return;
-        }
-
-        // Every search gets its own folder, named after the search.
-        std::wstring folder;
-        DWORD folderError = 0;
-        if (!create_search_folder(parentFolder, describe_radio_query(query), folder, folderError))
-        {
-            std::ostringstream message;
-            message << "Could not create a folder in " << wide_to_utf8(parentFolder)
-                << " (Windows error " << folderError << ").";
-            popup_message::g_show(message.str().c_str(), kTitle, popup_message::icon_error);
-            return;
-        }
-
-        // Stations that repeat a stream URL within this search are skipped.
-        std::set<std::string> knownUrls;
-
-        std::vector<std::string> logEntries;
-        std::vector<std::string> createdPaths; // for the playlist
-        size_t loggedCount = 0;
-        unsigned created = 0;
-        unsigned skipped = 0;
-        unsigned failed = 0;
-
-        // Only the first entries are listed in detail; counts cover them all.
-        const auto addLog = [&](std::string text)
-            {
-                if (loggedCount++ < kRbMaxDetailedEntries)
-                    logEntries.emplace_back(std::move(text));
-            };
-
-        for (const auto& station : stations)
-        {
-            std::string label;
-            std::string url;
-            std::string outputPath;
-
-            try
-            {
-                if (!station.is_object())
-                    continue;
-
-                label = json_text(station, "name");
-                url = json_text(station, "url_resolved");
-                if (url.empty())
-                    url = json_text(station, "url");
-
-                const bool httpUrl =
-                    url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
-
-                if (label.empty() || !httpUrl)
-                {
-                    ++skipped;
-                    addLog("[SKIPPED] " + (label.empty() ? std::string("(no name)") : label) +
-                        "\n          No usable name or http(s) stream URL.");
-                    continue;
-                }
-
-                if (!knownUrls.insert(url).second)
-                {
-                    ++skipped;
-                    addLog("[SKIPPED] " + label +
-                        "\n          @  : " + url +
-                        "\n          -> Another station in this search already uses this URL.");
-                    continue;
-                }
-
-                const std::string contents =
-                    json::array({ radio_station_to_utag(station, label, url) })
-                    .dump(4, ' ', false, json::error_handler_t::replace) + "\n";
-
-                if (write_unique_utag(folder, make_safe_filename_base(label),
-                    contents, outputPath))
-                {
-                    ++created;
-                    createdPaths.push_back(outputPath);
-                    addLog("[CREATED] " + label +
-                        "\n          @  : " + url +
-                        "\n          -> " + outputPath);
-                }
-                else
-                {
-                    ++skipped;
-                    addLog("[SKIPPED] " + label +
-                        "\n          @  : " + url +
-                        "\n          -> Tried 9999 filename variants; no available filename.");
-                }
-            }
-            catch (const std::exception& e)
-            {
-                ++failed;
-                std::string entry = "[ERROR] " + (label.empty() ? url : label);
-                entry += "\n        Source: " + url;
-                if (!outputPath.empty()) entry += "\n        Output: " + outputPath;
-                entry += "\n        Reason: ";
-                entry += e.what();
-                addLog(std::move(entry));
-            }
-        }
-
-        // Put the new files into a playlist named like the search folder.
-        std::string playlistNote;
-        if (!createdPaths.empty())
-        {
-            try
-            {
-                const size_t slash = folder.find_last_of(L"\\/");
-                const std::string playlistName = wide_to_utf8(
-                    slash == std::wstring::npos ? folder : folder.substr(slash + 1));
-
-                std::vector<pfc::string8> canonical;
-                canonical.reserve(createdPaths.size());
-                for (const auto& path : createdPaths)
-                {
-                    pfc::string8 canonicalPath;
-                    filesystem::g_get_canonical_path(path.c_str(), canonicalPath);
-                    canonical.push_back(canonicalPath);
-                }
-
-                pfc::list_t<const char*> locations;
-                for (const auto& path : canonical)
-                    locations.add_item(path.get_ptr());
-
-                static_api_ptr_t<playlist_manager> playlists;
-                const t_size index = playlists->create_playlist(
-                    playlistName.c_str(), playlistName.length(), pfc_infinite);
-                playlists->set_active_playlist(index);
-                playlists->playlist_add_locations(index, locations, true, owner);
-
-                playlistNote = "Playlist: " + playlistName + " (" +
-                    std::to_string(createdPaths.size()) + " entries)";
-            }
-            catch (const std::exception& e)
-            {
-                playlistNote = std::string("Could not create the playlist: ") + e.what();
-            }
-        }
-
-        std::ostringstream results;
-        results << "Import stations from Radio Browser - Results"
-            << "\r\n\r\n" << "Output folder: " << wide_to_utf8(folder)
-            << "\r\n" << "Stations returned: " << stations.size();
-
-        if (!playlistNote.empty())
-            results << "\r\n" << playlistNote;
-
-        results << "\r\n\r\n" << std::string(64, '-');
-
-        for (const auto& entry : logEntries)
-            results << "\r\n\r\n" << entry;
-
-        if (loggedCount > kRbMaxDetailedEntries)
-        {
-            results << "\r\n\r\n... and " << (loggedCount - kRbMaxDetailedEntries)
-                << " more (details are shown for the first "
-                << kRbMaxDetailedEntries << " stations).";
-        }
-
-        results << "\r\n\r\n" << std::string(64, '-')
-            << "\r\n\r\n" << "Summary: Created " << created << " | Skipped " << skipped
-            << " | Failed " << failed;
-
-        const std::string resultsText = results.str();
-        popup_message::g_show(resultsText.c_str(), kTitle, popup_message::icon_information);
+        open_radio_query_dialog(owner);
     }
 }
 
@@ -3965,153 +4295,7 @@ public:
             return;
         }
 
-        std::wstring wideUrl;
-        std::wstring wideName;
-        if (!prompt_for_station(owner, wideUrl, wideName))
-            return;
-
-        std::wstring folder;
-        if (!get_default_folder(folder, false))
-            return;
-
-        std::vector<std::string> logEntries;
-        logEntries.emplace_back("Add internet radio url and create utag - Results");
-        logEntries.emplace_back("Output folder: " + wide_to_utf8(folder));
-        logEntries.emplace_back(std::string(64, '-'));
-
-        std::string url;
-        std::string label;
-        std::string outputPath;
-        bool probed = false;
-        unsigned created = 0;
-        unsigned skipped = 0;
-        unsigned failed = 0;
-
-        try
-        {
-            url = wide_to_utf8(wideUrl);
-            std::string name = wide_to_utf8(wideName);
-
-            // No name typed in: ask the stream for it. An unreachable server
-            // (or an abort) stops here and nothing is created.
-            if (name.empty() && !is_utag_path(url))
-            {
-                const station_probe_result probe = probe_station_name(owner, url);
-
-                if (!probe.error.empty())
-                    throw std::runtime_error("Could not reach the stream: " + probe.error);
-                if (!probe.finished)
-                    throw std::runtime_error("Station lookup was cancelled; no file created.");
-
-                name = probe.name;
-                probed = !name.empty();
-            }
-
-            label = name.empty() ? station_label_from_url(url) : name;
-
-            if (is_utag_path(url))
-            {
-                ++skipped;
-                logEntries.emplace_back(
-                    "[SKIPPED] That is a .utag file, not a stream URL: " + url);
-            }
-            else
-            {
-                json station = json::object();
-                station["name"] = label;
-                station["@"] = url;
-                const std::string contents = json::array({ station }).dump(4, ' ', false, json::error_handler_t::replace) + "\n";
-
-                if (write_unique_utag(folder, make_safe_filename_base(label),
-                    contents, outputPath))
-                {
-                    ++created;
-                    logEntries.emplace_back("[CREATED] " + label +
-                        (probed ? " (name from stream)" : "") +
-                        "\n          @  : " + url +
-                        "\n          -> " + outputPath);
-
-                    try
-                    {
-                        static_api_ptr_t<playlist_manager> playlists;
-                        const std::string playlistName = "New utags";
-
-                        // Make canonical path for the created file.
-                        pfc::string8 canonicalPath;
-                        filesystem::g_get_canonical_path(outputPath.c_str(), canonicalPath);
-
-                        pfc::list_t<const char*> locations;
-                        locations.add_item(canonicalPath.get_ptr());
-
-                        // find_or_create_playlist returns index or pfc_infinite on failure.
-                        const t_size plIndex = playlists->find_or_create_playlist(playlistName.c_str(), playlistName.length());
-                        if (plIndex != pfc_infinite)
-                        {
-                            playlists->playlist_add_locations(plIndex, locations, true, owner);
-                            playlists->set_active_playlist(plIndex);
-                        }
-                        else
-                        {
-                            // Fallback: try create_playlist if find_or_create failed.
-                            const t_size createdIndex = playlists->create_playlist(playlistName.c_str(), playlistName.length(), pfc_infinite);
-                            if (createdIndex != pfc_infinite)
-                            {
-                                playlists->playlist_add_locations(createdIndex, locations, true, owner);
-                                playlists->set_active_playlist(createdIndex);
-                            }
-                        }
-                    }
-                    catch (...)
-                    {
-                        // Don't treat playlist failures as fatal for utag creation.
-                    }
-                }
-                else
-                {
-                    ++skipped;
-                    logEntries.emplace_back("[SKIPPED] " + label +
-                        "\n          @  : " + url +
-                        "\n          -> Tried 9999 filename variants; no available filename.");
-                }
-            }
-        }
-        catch (const std::exception& e)
-        {
-            ++failed;
-            std::string entry = "[ERROR] " + (label.empty() ? url : label);
-            entry += "\n        Source: " + url;
-            if (!outputPath.empty()) entry += "\n        Output: " + outputPath;
-            entry += "\n        Reason: ";
-            entry += e.what();
-            logEntries.emplace_back(std::move(entry));
-        }
-        catch (...)
-        {
-            ++failed;
-            std::string entry = "[ERROR] " + (label.empty() ? url : label);
-            entry += "\n        Source: " + url + "\n        Reason: Unknown error.";
-            if (!outputPath.empty()) entry += "\n        Output: " + outputPath;
-            logEntries.emplace_back(std::move(entry));
-        }
-
-        logEntries.emplace_back(std::string(64, '-'));
-        std::ostringstream summary;
-        summary << "Summary: Created " << created << " | Skipped " << skipped
-            << " | Failed " << failed;
-        logEntries.emplace_back(summary.str());
-
-        std::ostringstream results;
-        for (size_t i = 0; i < logEntries.size(); ++i)
-        {
-            if (i != 0) results << "\r\n\r\n";
-            results << logEntries[i];
-        }
-
-        const std::string resultsText = results.str();
-        popup_message::g_show(
-            resultsText.c_str(),
-            "Add internet radio url and create utag",
-            popup_message::icon_information);
+        open_station_dialog(owner);
     }
 };
 
