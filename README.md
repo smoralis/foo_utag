@@ -145,6 +145,8 @@ The component provides this Advanced preference:
 
 **utag: download favicon image during playback**
 
+It is located under **Preferences → Tools → Utag Input** and is disabled by default.
+
 Optional favicon download during playback, using the favicon URL stored in the .utag JSON.
 
 Downloads run asynchronously and should not block playback initialization.
