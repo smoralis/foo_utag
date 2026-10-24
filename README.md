@@ -11,13 +11,15 @@ The `.utag` file stores the stream URL and metadata. foobar2000 can scan and tag
 - **Stream URL in Properties:** the URL is exposed in the information section as `@` and can be displayed with `%__@%`.
 - **Create files from a playlist:** use **Tagging → Create utag files...** in the playlist context menu to create one `.utag` file for each selected track.
 - **Default folder:** **Tagging → Set default utag folder...** saves an output folder, and **Tagging → Create utag files in default folder** creates the files there without asking.
-- **Add a station by URL:** **File → Add internet radio url and create utag** asks for a stream URL (and an optional name) and creates the `.utag` file in the default folder. If no name is entered, it is looked up from the stream. Track is sent to the "New utags" playlist.
-- **Import from Radio Browser:** **File → Import stations from Radio Browser...** downloads stations from the [Radio Browser](https://www.radio-browser.info/) directory and creates one `.utag` file per station, in a new folder named after the search.																																																														
-- **Results popup:** every created or skipped entry lists the stream URL (`@`) and the output path; errors list the source URL and the reason.
-
-- **Optional stream handoff:** an Advanced preference can reuse the running decoder when the playing item is reopened after retagging, helping avoid a reconnect and audible pause. Preferences → Tools → Utag Input
-- **Optional favicon download during playback:** an Advanced preference Optional favicon download during playback, using the favicon URL stored in the .utag JSON. Preferences → Tools → Utag Input
-
+- **Add a station by URL:** **File → Add internet radio url and create utag** asks for a stream URL (and an optional name) and creates the `.utag` file in the default folder. If no name is entered, it is looked up from the stream. The new file is added to the "New utags" playlist, which becomes the active playlist.
+- **Import from Radio Browser:** **File → Import stations from Radio Browser...** downloads stations from the [Radio Browser](https://www.radio-browser.info/) directory and creates one `.utag` file per station, in a new folder named after the search.
+- **Browse Radio Browser:** **File → Browse Radio Browser...** lists the top stations, or the stations for a tag, country, language or codec you pick, or a name search. Choose the stations you want and import them.
+- **Import from TuneIn:** **File → Import stations from TuneIn...** searches TuneIn by station name, artist or song and creates one `.utag` file per station found.
+- **Browse TuneIn:** **File → Browse TuneIn...** walks TuneIn's categories, genres, locations and languages, your presets, searches and recommendations (for a list of artists, or for the playing station). Choose the stations you want and import them.
+- **Results window:** every created or skipped entry lists the stream URL (`@`) and the output path; errors list the source URL and the reason. The window can be switched off in the preferences (errors are still shown).
+- **Preferences page:** **Preferences → Tools → Utag Input** has the stream handoff, favicon download, default folder, console message and results window options.
+- **Optional stream handoff:** reuses the running decoder when the playing item is reopened after retagging, helping avoid a reconnect and audible pause.
+- **Optional favicon download during playback:** downloads the favicon image stored in the `.utag` JSON, saved beside the `.utag` file and shown as artwork.
 
 ## `.utag` file format
 
@@ -74,9 +76,14 @@ Library scans use the metadata-only open path and do not intentionally connect t
 2. Fill in any filters; all of them are optional:
    - **Name contains** and **Tag / genre**
    - **Country code**: two letters, such as `DE`
+   - **Codec**, such as `MP3` or `AAC+`
    - **Min. bitrate (kbps)**
    - **Maximum stations**: 1 to 5000, default 100
+
+   The **Show all...** buttons next to the tag, country and codec fields open a list with a filter box and fill in the field for you.
 3. Press **Import**. If no default folder is saved yet, you are asked to choose one first.
+
+The window does not block foobar2000, and the import itself runs in the background with a progress window and an **Abort** button.
 
 Every import goes into its own new sub folder of the default folder, named after the search and the date and time, for example `Radio Browser - jazz - DE - 128+ kbps - top 100 - 2026-10-18 14-32-05` (tag, name, country code and minimum bitrate appear only when you filled them in). Earlier imports are therefore never mixed with new ones. No folder is created when nothing is found or the download fails.
 
@@ -87,6 +94,55 @@ Each station becomes a `.utag` file with its stream URL (`url_resolved`, or `url
 When the import finishes, the new files are also added to a new playlist named like the search folder, and that playlist becomes the active one. The results popup shows its name.
 
 The results popup lists the first 60 stations in detail (stream URL `@` and output path) and the summary counts all of them. If Radio Browser cannot be reached, nothing is created and an error is shown.
+
+## Browsing Radio Browser
+
+1. Choose **File → Browse Radio Browser...**. The window stays open while you keep using foobar2000.
+2. Open an entry from the home list (double-click, or press **Open**):
+   - **Most clicked**, **Most voted**, **Trending now** (recently clicked) and **Recently added or changed**
+   - **Tag...**, **Country...**, **Language...** and **Codec...**: each opens a list with a filter box, then shows the stations that match
+   - **Search by name...**
+3. Each station list shows up to 200 working stations, with codec, bitrate and country code. Lists are always sorted ascending by name, including the top lists.
+4. Select one or more stations and press **Import selected**, or double-click a station to import just that one. **Back** and **Home** move between lists.
+
+Imports behave like the search import above: a new sub folder of the default folder named after the list and the date and time, the same station fields, and a new playlist with the created files.
+
+## Importing stations from TuneIn
+
+1. Choose **File → Import stations from TuneIn...**.
+2. Enter what to search for and choose **Station name**, **Artist** or **Song title**.
+3. Set **Max stations** (1 to 200, default 25) and press **Import**. If no default folder is saved yet, you are asked to choose one first.
+
+Each station needs a further request to find its stream: a direct URL is used if TuneIn gives one, otherwise the first stream in the station's `.pls` or `.m3u` playlist. Anything after a `?` is removed from the stream URL. Stations whose stream cannot be found are skipped and listed in the results.
+
+Each station becomes a `.utag` file with `@`, `name`, `title`, `stream_tunein_id` (the TuneIn id), `favicon` (the station logo), and `codec` and `bitrate` when TuneIn provides them. Files go into a new sub folder of the default folder and are added to a new playlist, as with the Radio Browser import.
+
+**Station details (optional):** when **Look up station details when importing from TuneIn** is enabled in the preferences, one more request per station is made to TuneIn's station description, and these fields are added when TuneIn provides them:
+
+- `location`: city and state or country, as text
+- `description`: the station description
+- `genre`: TuneIn's genre name
+- `tunein_url`: TuneIn's own address for the station
+- `country_region_id`: TuneIn's country or region identifier
+
+If the details cannot be fetched for a station, the file is still created and the results note it. The lookup makes imports noticeably slower, so it is off by default.
+
+## Browsing TuneIn
+
+1. Choose **File → Browse TuneIn...**. The window stays open while you keep using foobar2000.
+2. The home list offers:
+   - **Local**, **Music**, **Sports**, **Talk**, **By location**, **By language**, **Best** and **Popular**
+   - **Genres**
+   - **My presets**: uses your TuneIn username, asked for the first time and saved. **Set TuneIn username...** changes it.
+   - **Search stations...**, **Search by artist...** and **Search by song title...**
+   - **Recommended stations for a list of artists...**: up to 10 artist names separated by commas
+   - **Recommendations for the playing station**: uses the `%stream_tunein_id%` field of the playing track, so it works for stations imported from TuneIn
+3. Entries starting with `>` open another list. Select one or more stations and press **Import selected**, or double-click a station to import just that one. **Back** and **Home** move between lists.
+
+Lists are always sorted ascending by name (inside each section, for lists that have sections).
+
+TuneIn is read through its unofficial OPML web service, which may change or stop working.
+
 ## Creating `.utag` files from a playlist
 
 1. Select one or more playlist tracks.
@@ -118,8 +174,7 @@ If the name field is empty, the component connects to the stream briefly and rea
 
 Files are never overwritten; duplicate names receive a numeric suffix such as `Station (2).utag`. 
 
-Track is sent to the "New utags" playlist.
-
+The new file is added to the "New utags" playlist, which becomes the active playlist.
 
 ## Editing tags
 
@@ -127,11 +182,25 @@ The component supports writing updated metadata back to the `.utag` file. The st
 
 When tags are saved, standard tag fields handled by the component are replaced using the metadata values supplied by foobar2000. Other JSON fields are retained unless they conflict with the fields being rewritten.
 
+## Preferences
+
+All options are on one page: **Preferences → Tools → Utag Input**.
+
+- **Playback**
+  - **Reuse the running stream when the playing item is retagged**: enabled by default
+  - **Download the favicon image during playback**: disabled by default
+- **Default folder**: used by **Create utag files in default folder**, by **Add internet radio url and create utag** and by the importers. If empty, you are asked when a folder is needed.
+- **Messages**
+  - **Write messages to the foobar2000 console**: enabled by default
+  - **Show a results window after import and create commands**: enabled by default. Errors are always shown. When it is off, a short summary is written to the console instead, and the full per-station details too if console messages are on.
+- **TuneIn**
+  - **Look up station details when importing from TuneIn**: disabled by default. See below.
+
 ## Stream handoff preference
 
-The component provides this Advanced preference:
+The component provides this preference:
 
-**utag: reuse stream when playing item is retagged**
+**Reuse the running stream when the playing item is retagged (avoids a reconnect pause)**
 
 It is located under **Preferences → Tools → Utag Input** and is enabled by default.
 
@@ -141,13 +210,13 @@ This behavior is intended to reduce reconnects and audible pauses when retagging
 
 ## favicon download during playback
 
-The component provides this Advanced preference:
+The component provides this preference:
 
-**utag: download favicon image during playback**
+**Download the favicon image during playback (saved next to the .utag file)**
 
 It is located under **Preferences → Tools → Utag Input** and is disabled by default.
 
-Optional favicon download during playback, using the favicon URL stored in the .utag JSON.
+The favicon URL stored in the `.utag` JSON is used.
 
 Downloads run asynchronously and should not block playback initialization.
 
@@ -165,10 +234,10 @@ The built-in Album Art Viewer may cache artwork and might not refresh automatica
 - The component does not connect to a stream during a library metadata scan.
 - The source limits `.utag` files to 4 MiB.
 - The playlist creation commands skip selected entries whose paths already end in `.utag`.
-- Radio Browser import needs an internet connection and uses the SDK's `http_client`; it fetches at most 5000 stations per run.
+- Radio Browser import needs an internet connection and uses the SDK's `http_client`; it fetches at most 5000 stations per run. The Radio Browser lists fetch at most 200 stations.
+- TuneIn import and browsing use TuneIn's OPML web service (`opml.radiotime.com`, over http). It is unofficial and undocumented, so it may change or stop working.
 - The station name lookup only reads HTTP response headers; it cannot find names for servers that do not send `icy-name` or `ice-name`.
 - Dark mode in the input box needs foobar2000 v2.0 or later; the folder chooser is a Windows dialog and follows the Windows theme.
-
 
 ## Local File References and Metadata Separation
 
@@ -218,9 +287,23 @@ The provided source is a C++ foobar2000 component and includes:
 
 - the foobar2000 SDK header `SDK/foobar2000.h`, plus `SDK/coreDarkMode.h` for dark mode support;
 - the `nlohmann/json.hpp` JSON header;
-- Windows SDK headers and libraries, including `Ole32.lib` and `Shell32.lib`.
+- Windows SDK headers and libraries, including `Ole32.lib`, `Shell32.lib` and `Urlmon.lib`.
 
-The station name lookup uses the SDK's `http_client` service, so the SDK version must provide it.
+The station name lookup and the Radio Browser and TuneIn features use the SDK's `http_client` service, so the SDK version must provide it.
+
+The source is split into several files, all of which belong to the component:
+
+- `utag_component.cpp`: component name, version and description, filename check
+- `utag_input.cpp`: the input (reading `.utag` files, tagging, playback)
+- `utag_album_art.cpp`: artwork extractor and editor
+- `utag_favicon.cpp`, `utag_handoff.cpp`: favicon download; stream handoff and technical-info cache
+- `utag_context_menu.cpp`, `utag_mainmenu.cpp`: playlist context menu and File menu commands
+- `utag_add_station.cpp`: add a station by URL
+- `utag_radio_browser.cpp`, `utag_radio_browse.cpp`: Radio Browser import and browse
+- `utag_tunein.cpp`, `utag_tunein_api.cpp`, `utag_tunein_browser.cpp`: TuneIn import, API layer and browse
+- `utag_prefs.cpp`, `utag_config.cpp`: preferences page and saved settings
+- `utag_ui_util.cpp`, `utag_util.cpp`: shared dialog, folder and helper functions
+- `utag_common.h`, `utag_ui.h`, `utag_radio.h`, `utag_tunein.h`: shared headers
 
 Build it with a compatible Windows C++ toolchain and foobar2000 SDK setup. The source uses the component filename `foo_utag.dll`. Exact project-generation and build commands depend on your local SDK and build environment.
 
