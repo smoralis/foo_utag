@@ -9,7 +9,7 @@ The `.utag` file stores the stream URL and metadata. foobar2000 can scan and tag
 - **Library-friendly scanning:** scanning a `.utag` file does not connect to the stream.
 - **Editable metadata:** tag changes are written back to the `.utag` JSON file.
 - **Stream URL in Properties:** the URL is exposed in the information section as `@` and can be displayed with `%__@%`.
-- **Create files from a playlist:** use **Tagging → Create utag files...** in the playlist context menu to create one `.utag` file for each selected track.
+- **Create files from a playlist:** use **Tagging → Create utag files...** in the playlist context menu to create one `.utag` file for each selected track.The new file(s) are added to the "New utags" playlist, which becomes the active playlist.
 - **Default folder:** **Tagging → Set default utag folder...** saves an output folder, and **Tagging → Create utag files in default folder** creates the files there without asking.
 - **Add a station by URL:** **File → Add internet radio url and create utag** asks for a stream URL (and an optional name) and creates the `.utag` file in the default folder. If no name is entered, it is looked up from the stream. The new file is added to the "New utags" playlist, which becomes the active playlist.
 - **Import from Radio Browser:** **File → Import stations from Radio Browser...** downloads stations from the [Radio Browser](https://www.radio-browser.info/) directory and creates one `.utag` file per station, in a new folder named after the search.
@@ -152,6 +152,7 @@ TuneIn is read through its unofficial OPML web service, which may change or stop
    - **Create utag files in default folder** creates the files in the default folder without asking. If no default folder is saved yet, or the saved folder no longer exists, you are asked to choose one first.
    - **Set default utag folder...** only chooses and saves the default folder.
 4. Read the results popup, which lists each entry's stream URL (`@`) and the file it was written to.
+5. The new file(s) are added to the "New utags" playlist, which becomes the active playlist.
 
 The component attempts to derive the station name and title from the selected tracks' metadata. It copies other metadata fields and preserves multi-value tags. Files are created without overwriting existing files; duplicate names receive a numeric suffix such as `Station (2).utag`.
 

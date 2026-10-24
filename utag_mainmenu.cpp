@@ -27,7 +27,7 @@ static const GUID g_browse_radio_browser_guid =
 class add_url_utag_mainmenu : public mainmenu_commands
 {
 public:
-    enum { cmd_add_url = 0, cmd_import_radio_browser, cmd_import_tunein, cmd_browse_tunein, cmd_browse_radio_browser, cmd_count };
+    enum { cmd_add_url = 0, cmd_import_radio_browser, cmd_browse_radio_browser, cmd_import_tunein, cmd_browse_tunein, cmd_count };
 
     t_uint32 get_command_count() override
     {

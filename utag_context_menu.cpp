@@ -61,6 +61,7 @@ static void create_utag_files_in_folder(
     unsigned skipped = 0;
     unsigned failed = 0;
     std::vector<std::string> logEntries;
+    std::vector<std::string> createdPaths;
     logEntries.emplace_back("Create utag files - Results");
     logEntries.emplace_back("Output folder: " + wide_to_utf8(folder));
     logEntries.emplace_back(std::string(64, '-'));
@@ -140,6 +141,7 @@ static void create_utag_files_in_folder(
             const bool saved = write_unique_utag(folder, safeName, contents, outputPath);
             if (saved)
             {
+                createdPaths.emplace_back(outputPath);
                 ++created;
                 logEntries.emplace_back("[CREATED] " + filenameLabel +
                     "\n          @  : " + url +
@@ -173,6 +175,51 @@ static void create_utag_files_in_folder(
             entry += "\n        Source: " + url + "\n        Reason: Unknown error.";
             if (!outputPath.empty()) entry += "\n        Output: " + outputPath;
             logEntries.emplace_back(std::move(entry));
+        }
+    }
+
+    // Send successfully created files to the dedicated playlist and activate it.
+    if (!createdPaths.empty())
+    {
+        const std::string playlistName = "New utags";
+        try
+        {
+            static_api_ptr_t<playlist_manager> playlists;
+            const HWND owner = core_api::get_main_window();
+            pfc::list_t<const char*> locations;
+            std::vector<pfc::string8> canonicalPaths;
+            canonicalPaths.reserve(createdPaths.size());
+
+            for (const auto& path : createdPaths)
+            {
+                canonicalPaths.emplace_back();
+                filesystem::g_get_canonical_path(path.c_str(), canonicalPaths.back());
+            }
+            for (const auto& path : canonicalPaths)
+                locations.add_item(path.get_ptr());
+
+            t_size index = playlists->find_or_create_playlist(
+                playlistName.c_str(), playlistName.length());
+            if (index == pfc_infinite)
+                index = playlists->create_playlist(
+                    playlistName.c_str(), playlistName.length(), pfc_infinite);
+            if (index == pfc_infinite)
+                throw std::runtime_error("the playlist could not be created");
+
+            playlists->set_active_playlist(index);
+            playlists->playlist_add_locations(index, locations, true, owner);
+            logEntries.emplace_back("Added " + std::to_string(createdPaths.size()) +
+                " created file(s) to the \"" + playlistName + "\" playlist and made it active.");
+        }
+        catch (const std::exception& e)
+        {
+            logEntries.emplace_back(std::string("Could not add created files to the \"") +
+                playlistName + "\" playlist: " + e.what());
+        }
+        catch (...)
+        {
+            logEntries.emplace_back("Could not add created files to the \"" +
+                playlistName + "\" playlist: unknown error.");
         }
     }
 
