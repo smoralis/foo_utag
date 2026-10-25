@@ -1174,6 +1174,8 @@ namespace
         if (bitrate != station.end() && bitrate->is_number() && bitrate->get<double>() > 0)
             entry["bitrate"] = std::to_string(static_cast<long long>(bitrate->get<double>()));
 
+        add_country_flag(entry); // countrycode -> countryflag (emoji)
+
         return entry;
     }
 

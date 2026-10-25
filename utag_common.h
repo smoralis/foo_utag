@@ -71,6 +71,16 @@ std::string lowercase_ascii(std::string value);
 bool is_reserved_key(const std::string& key);
 bool is_standard_tag_key(const std::string& key);
 std::string json_value_to_string(const json& value);
+
+// "GR" -> the flag emoji (two regional indicator symbols, UTF-8). Empty unless
+// the code is exactly two ASCII letters.
+std::string country_code_to_flag(const std::string& countryCode);
+
+// When the station object has a "countrycode" field (any letter case), adds a
+// "countryflag" field with the matching flag emoji, e.g. GR -> the Greek flag.
+// An existing non-empty "countryflag" is left alone, unless `overwrite` is true
+// (used when saving tags, so the flag always follows the country code).
+void add_country_flag(json& station, bool overwrite = false);
 double json_duration_to_seconds(const json& value);
 bool is_local_file_reference(const std::string& url);
 bool reference_is_utag(const std::string& ref);

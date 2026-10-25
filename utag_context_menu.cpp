@@ -239,6 +239,7 @@ private:
 
         const std::wstring safeName = make_safe_filename_base(item.filenameLabel);
         station["@"] = item.url;
+        add_country_flag(station);
         const std::string contents = json::array({ station }).dump(4, ' ', false,
             json::error_handler_t::replace) + "\n";
 
@@ -439,6 +440,18 @@ namespace
             info.meta_remove_field(key.c_str());
             for (const auto& value : values)
                 info.meta_add(key.c_str(), value.c_str());
+        }
+
+        // countrycode -> countryflag (emoji), also when the item already had a code.
+        const char* code = info.meta_get("countrycode", 0);
+        if (code != nullptr)
+        {
+            const std::string flag = country_code_to_flag(code);
+            if (!flag.empty())
+            {
+                info.meta_remove_field("countryflag");
+                info.meta_add("countryflag", flag.c_str());
+            }
         }
     }
 

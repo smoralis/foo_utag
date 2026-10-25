@@ -577,6 +577,10 @@ public:
             }
         }
 
+        // countryflag always follows countrycode (GR -> the Greek flag emoji),
+        // replacing a flag typed or left over from an earlier code.
+        add_country_flag(updated, true);
+
         // ReplayGain values as edited in Properties (old ones were erased above,
         // so clearing a field removes it from the file).
         const replaygain_info replayGain = info.get_replaygain();

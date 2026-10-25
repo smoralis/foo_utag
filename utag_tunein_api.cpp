@@ -503,6 +503,7 @@ namespace
                     if (m_details)
                         add_details(c, abort, entry, detailsNote);
 
+                    add_country_flag(entry);
                     const std::string contents =
                         json::array({ entry }).dump(4, ' ', false, json::error_handler_t::replace) + "\n";
 

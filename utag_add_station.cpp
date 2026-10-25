@@ -455,6 +455,7 @@ namespace
             station["@"] = m_url;
             if (fromRadioBrowser)
                 station["title"] = m_label;
+            add_country_flag(station);
             const std::string contents = json::array({ station }).dump(4, ' ', false, json::error_handler_t::replace) + "\n";
 
             if (write_unique_utag(m_folder, make_safe_filename_base(m_label),

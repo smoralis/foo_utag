@@ -163,6 +163,77 @@ std::string json_value_to_string(const json& value)
 
     return value.dump();
 }
+std::string country_code_to_flag(const std::string& countryCode)
+{
+    const char* ws = " \t\r\n";
+    const size_t first = countryCode.find_first_not_of(ws);
+    if (first == std::string::npos)
+        return {};
+    const std::string code = countryCode.substr(
+        first, countryCode.find_last_not_of(ws) - first + 1);
+
+    if (code.size() != 2)
+        return {};
+
+    std::string flag;
+    for (const char ch : code)
+    {
+        const bool upper = ch >= 'A' && ch <= 'Z';
+        const bool lower = ch >= 'a' && ch <= 'z';
+        if (!upper && !lower)
+            return {};
+
+        // Regional indicator symbols U+1F1E6 (A) .. U+1F1FF (Z), as UTF-8.
+        const unsigned codePoint = 0x1F1E6u + static_cast<unsigned>((upper ? ch - 'A' : ch - 'a'));
+        flag += static_cast<char>(0xF0 | (codePoint >> 18));
+        flag += static_cast<char>(0x80 | ((codePoint >> 12) & 0x3F));
+        flag += static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F));
+        flag += static_cast<char>(0x80 | (codePoint & 0x3F));
+    }
+    return flag;
+}
+
+void add_country_flag(json& station, bool overwrite)
+{
+    if (!station.is_object())
+        return;
+
+    // Look for the country code and any existing flag field (any letter case).
+    std::string code;
+    bool haveCode = false;
+    std::vector<std::string> flagKeys;
+    bool haveFlag = false;
+
+    for (auto it = station.begin(); it != station.end(); ++it)
+    {
+        const std::string lower = lowercase_ascii(it.key());
+        if (lower == "countrycode" && !haveCode)
+        {
+            haveCode = true;
+            if (it.value().is_string())
+                code = it.value().get<std::string>();
+            else if (it.value().is_array() && !it.value().empty() && it.value().front().is_string())
+                code = it.value().front().get<std::string>();
+        }
+        else if (lower == "countryflag")
+        {
+            flagKeys.push_back(it.key());
+            if (it.value().is_string() && !it.value().get<std::string>().empty())
+                haveFlag = true;
+        }
+    }
+
+    if (!haveCode || (haveFlag && !overwrite))
+        return;
+
+    const std::string flag = country_code_to_flag(code);
+    if (flag.empty())
+        return; // no valid code: keep whatever flag field exists
+
+    for (const auto& key : flagKeys)
+        station.erase(key); // avoids "CountryFlag" next to "countryflag"
+    station["countryflag"] = flag;
+}
 
 double json_duration_to_seconds(const json& value)
 {
