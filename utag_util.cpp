@@ -4,9 +4,37 @@
 // Path helpers
 // -----------------------------------------------------------------------------
 
+std::wstring utf8_to_wide(const std::string& text);
+
 std::string to_native_windows_path(const std::string& path)
 {
     constexpr char prefix[] = "file://";
+    constexpr char relativePrefix[] = "file-relative://";
+
+    // file-relative:// is a foobar2000 path scheme, not a Win32 path.
+    // Canonicalizing it with g_get_canonical_path() can leave the scheme
+    // intact, which makes URLDownloadToFileW fail with E_ABORT. Strip the
+    // scheme and ask Win32 to resolve the remaining relative path against the
+    // process working directory (foobar2000's file-relative base).
+    if (path.compare(0, sizeof(relativePrefix) - 1, relativePrefix) == 0)
+    {
+        std::wstring relative = utf8_to_wide(
+            path.substr(sizeof(relativePrefix) - 1));
+        std::replace(relative.begin(), relative.end(), L'/', L'\\');
+
+        const DWORD needed = GetFullPathNameW(relative.c_str(), 0, nullptr, nullptr);
+        if (needed == 0)
+            throw exception_io_data();
+
+        std::wstring absolute(static_cast<size_t>(needed), L'\0');
+        const DWORD written = GetFullPathNameW(
+            relative.c_str(), needed, absolute.data(), nullptr);
+        if (written == 0 || written >= needed)
+            throw exception_io_data();
+
+        absolute.resize(written);
+        return pfc::stringcvt::string_utf8_from_wide(absolute.c_str()).get_ptr();
+    }
 
     if (path.compare(0, sizeof(prefix) - 1, prefix) == 0)
         return path.substr(sizeof(prefix) - 1);
