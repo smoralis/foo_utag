@@ -42,6 +42,7 @@ extern const GUID g_utag_guid;
 // ---- utag_config.cpp: persisted options
 extern cfg_bool g_cfg_handoff;
 extern cfg_bool g_cfg_favicon;
+extern cfg_bool g_cfg_logo_fileops;
 extern cfg_bool g_cfg_logging;
 extern cfg_bool g_cfg_result_popups;
 extern cfg_bool g_cfg_tunein_details;
@@ -55,6 +56,7 @@ extern cfg_string g_cfg_playlist_icecast;
 
 bool handoff_enabled();
 bool favicon_download_enabled();
+bool logo_fileops_enabled();
 bool utag_console_logging_enabled();
 
 // Convenience logging macro used throughout this file. Replace existing
@@ -91,9 +93,22 @@ std::string percent_encode(const std::string& text);
 // Case-insensitive, locale-aware comparison of two UTF-8 names: <0, 0 or >0.
 int compare_names(const std::string& a, const std::string& b);
 
-// ---- utag_favicon.cpp
+// ---- utag_favicon.cpp: sidecar image helpers and favicon download
+// Station artwork is a "sidecar" image beside the .utag file (same folder, same
+// basename, image extension). A manually assigned logo and a downloaded favicon
+// are the same kind of file. All `utagPath` parameters take a foobar2000 path
+// ("file://..." or native) as returned by metadb_handle::get_path().
 std::string favicon_extension_for_url(const std::string& url);
 void schedule_favicon_download_for_playback(const std::string& utagPath, const json& station);
+std::wstring image_extension_by_magic(const std::wstring& nativePath); // ".png" etc., empty = not an image
+std::wstring station_artwork_stem(const std::string& utagPath);        // path without extension
+std::wstring find_station_artwork(const std::string& utagPath);        // existing sidecar or empty
+unsigned delete_station_artwork_except(const std::string& utagPath, const std::wstring& keep);
+void notify_utag_artwork_changed(const std::string& utagPath);
+
+// ---- utag_artwork.cpp: manually assigned station logos
+bool set_station_logo_from_file(const std::string& utagPath, const std::wstring& imageFile, std::string& error);
+bool remove_station_logo(const std::string& utagPath, std::string& error);
 
 // ---- utag_handoff.cpp: stream handoff and technical-info cache
 namespace utag_state

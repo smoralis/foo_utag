@@ -1,8 +1,9 @@
 #include "utag_common.h"
 
-// Extracts the saved favicon as front-cover artwork when available. Favicon
-// downloading is asynchronous, so an initial artwork query may happen before the
-// sidecar exists; later queries can use it. If it is not present, preserve the
+// Extracts the station artwork - the sidecar image beside the .utag file, either
+// a manually assigned logo or a downloaded favicon - as front-cover artwork.
+// Favicon downloading is asynchronous, so an initial artwork query may happen
+// before the sidecar exists; later queries can use it. If it is not present, preserve the
 // referenced-file fallback. The built-in viewer may cache artwork and may need
 // its own refresh/track-change before it asks again.
 class utag_album_art_extractor_instance : public album_art_extractor_instance
@@ -101,28 +102,18 @@ public:
             throw exception_album_art_not_found();
 
         const std::string reference = to_native_windows_path(refIt->get<std::string>());
+        // Sidecar image beside the .utag (manual logo or downloaded favicon).
+        // No "favicon" key is needed for a manually assigned logo.
         std::string imagePath;
-        const auto faviconIt = parsed[0].find("favicon");
-        if (faviconIt != parsed[0].end() && faviconIt->is_string())
+        try
         {
-            const std::string url = faviconIt->get<std::string>();
-            if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0)
-            {
-                const std::string extension = favicon_extension_for_url(url);
-
-                std::string nativePath = to_native_windows_path(path);
-                const size_t pathSlash = nativePath.find_last_of("\\/");
-                const size_t pathDot = nativePath.find_last_of('.');
-                if (pathDot != std::string::npos &&
-                    (pathSlash == std::string::npos || pathDot > pathSlash))
-                {
-                    imagePath = nativePath.substr(0, pathDot) + extension;
-                    const std::wstring wideImage = utf8_to_wide(imagePath);
-                    const DWORD attrs = GetFileAttributesW(wideImage.c_str());
-                    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY))
-                        imagePath.clear();
-                }
-            }
+            const std::wstring found = find_station_artwork(path);
+            if (!found.empty())
+                imagePath = wide_to_utf8(found);
+        }
+        catch (...)
+        {
+            imagePath.clear();
         }
 
         abort.check();

@@ -52,8 +52,62 @@ static const GUID g_create_utag_auto_guid =
 static const GUID g_set_utag_folder_guid =
 { 0x545b0497, 0xbf41, 0x4f62, { 0xa7, 0x9b, 0x7d, 0xfe, 0x5a, 0x40, 0xe4, 0x21 } };
 
+// Menu items: assign / remove a station logo (the sidecar image beside the .utag).
+// {2CBC0C9A-483C-4C6D-A3F0-965041B5FF60}
+static const GUID g_set_logo_guid =
+{ 0x2cbc0c9a, 0x483c, 0x4c6d, { 0xa3, 0xf0, 0x96, 0x50, 0x41, 0xb5, 0xff, 0x60 } };
+
+// {BD82ED71-6602-43D3-B66C-6441DC6106B9}
+static const GUID g_remove_logo_guid =
+{ 0xbd82ed71, 0x6602, 0x43d3, { 0xb6, 0x6c, 0x64, 0x41, 0xdc, 0x61, 0x06, 0xb9 } };
+
 namespace
 {
+
+// foobar2000 paths of the distinct .utag items in a selection.
+std::vector<std::string> collect_utag_paths(metadb_handle_list_cref data)
+{
+    std::vector<std::string> paths;
+    std::set<std::string> seen;
+    for (t_size i = 0; i < data.get_count(); ++i)
+    {
+        const char* path = data[i]->get_path();
+        if (path == nullptr || !is_utag_path(path)) continue;
+        if (seen.insert(path).second)
+            paths.emplace_back(path);
+    }
+    return paths;
+}
+
+// Deletes the logo images of the selected stations after asking once.
+void remove_logos_for_selection(const std::vector<std::string>& paths)
+{
+    std::vector<std::string> withLogo;
+    for (const auto& path : paths)
+        if (!find_station_artwork(path).empty())
+            withLogo.push_back(path);
+    if (withLogo.empty()) return;
+
+    const std::wstring question = withLogo.size() == 1
+        ? L"Remove the logo image of the selected station?\n\nThe image file beside the .utag file will be deleted."
+        : L"Remove the logo images of " + std::to_wstring(withLogo.size()) +
+          L" stations?\n\nThe image files beside the .utag files will be deleted.";
+    if (MessageBoxW(core_api::get_main_window(), question.c_str(), L"Remove station logo",
+        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
+        return;
+
+    unsigned removed = 0;
+    for (const auto& path : withLogo)
+    {
+        std::string error;
+        if (remove_station_logo(path, error))
+            ++removed;
+        else
+            console::printf("[foo_utag] could not remove logo of %s: %s",
+                path.c_str(), error.c_str());
+    }
+    console::printf("[foo_utag] removed %u station logo(s)", removed);
+}
 
 // One selected playlist entry, captured on the main thread so the worker thread
 // never touches metadb handles.
@@ -665,7 +719,7 @@ static void start_radio_browser_tagging(metadb_handle_list_cref data)
 class create_utag_context_menu : public contextmenu_item_simple
 {
 public:
-    enum { cmd_create = 0, cmd_create_auto, cmd_set_folder, cmd_rb_tag, cmd_count };
+    enum { cmd_create = 0, cmd_create_auto, cmd_set_folder, cmd_rb_tag, cmd_set_logo, cmd_remove_logo, cmd_count };
 
     unsigned get_num_items() override
     {
@@ -680,6 +734,8 @@ public:
         case cmd_create_auto: out = "Create utag files in default folder"; break;
         case cmd_set_folder: out = "Set default utag folder..."; break;
         case cmd_rb_tag:     out = "Search Radio Browser and tag"; break;
+        case cmd_set_logo:   out = "Set station logo..."; break;
+        case cmd_remove_logo: out = "Remove station logo"; break;
         }
     }
 
@@ -690,6 +746,8 @@ public:
         case cmd_create_auto: return g_create_utag_auto_guid;
         case cmd_set_folder:  return g_set_utag_folder_guid;
         case cmd_rb_tag:      return g_rb_tag_guid;
+        case cmd_set_logo:    return g_set_logo_guid;
+        case cmd_remove_logo: return g_remove_logo_guid;
         default:              return g_create_utag_guid;
         }
     }
@@ -715,6 +773,12 @@ public:
         case cmd_rb_tag:
             out = "Look up the \"@\" URL of each selected .utag in Radio Browser and write the station details into its tags.";
             return true;
+        case cmd_set_logo:
+            out = "Choose or drop an image to use as the logo of the selected stations. It is saved beside the .utag file.";
+            return true;
+        case cmd_remove_logo:
+            out = "Delete the logo image saved beside each selected .utag file.";
+            return true;
         }
         return false;
     }
@@ -727,7 +791,19 @@ public:
         unsigned& flags,
         const GUID& caller) override
     {
-        if (index == cmd_rb_tag)
+        if (index == cmd_remove_logo)
+        {
+            bool anyLogo = false;
+            for (t_size i = 0; i < data.get_count() && !anyLogo; ++i)
+            {
+                const char* path = data[i]->get_path();
+                anyLogo = path != nullptr && is_utag_path(path) &&
+                    !find_station_artwork(path).empty();
+            }
+            if (!anyLogo) return false;
+        }
+
+        if (index == cmd_rb_tag || index == cmd_set_logo)
         {
             bool anyUtag = false;
             for (t_size i = 0; i < data.get_count() && !anyUtag; ++i)
@@ -758,6 +834,18 @@ public:
         if (index == cmd_rb_tag)
         {
             start_radio_browser_tagging(data);
+            return;
+        }
+
+        if (index == cmd_set_logo)
+        {
+            utag_open_logo_dialog(core_api::get_main_window(), collect_utag_paths(data));
+            return;
+        }
+
+        if (index == cmd_remove_logo)
+        {
+            remove_logos_for_selection(collect_utag_paths(data));
             return;
         }
 

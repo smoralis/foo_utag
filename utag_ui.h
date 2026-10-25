@@ -47,6 +47,9 @@ void utag_open_tunein_dialog(HWND owner);   // utag_tunein.cpp (search import)
 void utag_open_tunein_browser(HWND owner);  // utag_tunein_browser.cpp
 void utag_open_radio_browse(HWND owner);    // utag_radio_browse.cpp
 void utag_open_icecast_browse(HWND owner);  // utag_icecast_browse.cpp
+// utag_artwork.cpp: modeless "Station logo" window (drop an image file or image
+// URL on it, or Browse). `utagPaths` are foobar2000 paths of .utag files.
+void utag_open_logo_dialog(HWND owner, const std::vector<std::string>& utagPaths);
 
 // Small in-memory dialog template (no .rc file needed).
 class dialog_template

@@ -2,7 +2,7 @@
 
 DECLARE_COMPONENT_VERSION(
     "utag Input",
-    "1.0.13",
+    "1.0.14",
     "Adds internet radio streams and other remote URLs to the Media Library.\n"
     "\n"
     "Each .utag file is a small JSON stub that stores a stream URL (\"@\") together\n"
@@ -15,6 +15,10 @@ DECLARE_COMPONENT_VERSION(
     "- Editable tags, saved back into the .utag file\n"
     "- Stream URL shown in Properties under Other (%__@%)\n"
     "- Station favicon shown as artwork (downloaded during playback, optional)\n"
+    "- Manual station logos: Tagging > Set station logo... (drop an image file or\n"
+    "  image URL, or Browse); saved beside the .utag file and used as artwork\n"
+    "- The logo image follows its .utag file when foobar2000 moves, copies or\n"
+    "  deletes it (File Operations, Remove from disk; optional)\n"
     "- Reuses the running stream when the playing item is retagged (optional)\n"
     "\n"
     "Creating .utag files:\n"

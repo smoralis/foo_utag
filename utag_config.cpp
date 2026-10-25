@@ -106,3 +106,16 @@ static const GUID g_guid_cfg_playlist_icecast =
 cfg_string g_cfg_playlist_radiobrowser(g_guid_cfg_playlist_radiobrowser, "RadioBrowser");
 cfg_string g_cfg_playlist_tunein(g_guid_cfg_playlist_tunein, "Tunein");
 cfg_string g_cfg_playlist_icecast(g_guid_cfg_playlist_icecast, "Icecast");
+
+// Move, copy and delete a station's logo image together with its .utag file
+// when foobar2000 (File Operations, Remove from disk) does that to the .utag.
+// {86953291-A2F5-4D4C-8603-AE4B4D121379}
+static const GUID g_guid_cfg_logo_fileops =
+{ 0x86953291, 0xa2f5, 0x4d4c, { 0x86, 0x03, 0xae, 0x4b, 0x4d, 0x12, 0x13, 0x79 } };
+
+cfg_bool g_cfg_logo_fileops(g_guid_cfg_logo_fileops, true);
+
+bool logo_fileops_enabled()
+{
+    return g_cfg_logo_fileops;
+}

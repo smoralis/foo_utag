@@ -24,6 +24,7 @@ The `.utag` file stores the stream URL and metadata. foobar2000 can scan and tag
 - **Results window:** every created or skipped entry lists the stream URL (`@`) and the output path; errors list the source URL and the reason. The window can be switched off in the preferences (errors are still shown).
 - **Preferences page:** **Preferences → Tools → Utag Input** has the stream handoff, favicon download, default folder, console message, results window, Radio Browser lookup, TuneIn details and browse-window playlist options.
 - **Optional stream handoff:** reuses the running decoder when the playing item is reopened after retagging, helping avoid a reconnect and audible pause.
+- **Station logos:** assign a logo by hand (**Tagging → Set station logo...**), by dropping an image file or image URL on the logo window, or with the optional favicon download. All of them are the same sidecar image beside the `.utag` file, shown as artwork. See [Station logos](#station-logos).																																																																										  
 - **Optional favicon download during playback:** downloads the favicon image stored in the `.utag` JSON, saved beside the `.utag` file and shown as artwork.
 
 ## `.utag` file format
@@ -250,10 +251,37 @@ Downloads run asynchronously and should not block playback initialization.
 
 The image is saved beside the .utag file using the same base filename and the extension inferred from the favicon URL.
 
-Existing images are skipped, and downloads use a temporary file before publishing the completed image.
+Any existing sidecar image (including a manually assigned logo) is kept and no download is made, and downloads use a temporary file before publishing the completed image.
 
 The built-in Album Art Viewer may cache artwork and might not refresh automatically when the download completes.
 
+## Station logos
+
+A station's artwork is a **sidecar image** beside its `.utag` file: same folder, same base name, with an image extension (`.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.webp` or `.svg`). The artwork extractor reads it whether it was downloaded or assigned by hand, and the `.utag` JSON is not changed. A station no longer needs a `favicon` key to have artwork.
+
+**Set station logo...** (playlist context menu, **Tagging**; appears when a `.utag` item is selected) opens a small window for the selected stations:
+
+- **Drop an image file** (for example from Explorer) on the window.
+- **Drop an image URL or an image dragged from a web page**; it is downloaded in the background (http and https).
+- **Browse...** to pick a file.
+- **Get favicon** downloads each station's own `favicon` URL right now, whatever the preference says.
+- **Remove** deletes the logo image (also available as **Remove station logo** in the context menu, which asks first).
+
+With several stations selected, a dropped image is used for all of them. The file is checked by its contents (not its name), copied beside the `.utag` under the station's base name with the correct extension, and replaces any older sidecar of that station. Images up to 32 MB are accepted. The preview needs Windows to be able to decode the format; SVG, and WebP on systems without the WebP extension, are saved and used as artwork but show no preview.
+
+### Moving, copying and deleting stations
+
+When foobar2000 moves, copies or deletes a `.utag` file, the logo image beside it is moved, copied or deleted too. Select the `.utag` items in a playlist or the Media Library and use foobar2000's own commands (**Move to...**, **Copy to...**, **Delete** / **Remove from disk**) or the File Operations component; foo_utag listens for the file operation notifications and follows along.
+
+- A logo is moved only after its `.utag` file has arrived at the new location, and deleted only after the `.utag` file is gone.
+- Existing artwork at the destination is never overwritten; the logo then stays where it was and a console message says so.
+- Renaming a `.utag` file with a tool that reports it as a move renames the logo with it.
+- Switch it off with **Move, copy and delete the logo image together with its .utag file...** in **Preferences → Tools → Utag Input** (on by default). When off, logo images stay where they are.
+- This only works for tools that report their file operations to foobar2000. Moving files in Explorer, or a tool that does not notify, leaves the logo behind.
+
+A logo that exists is never replaced by a downloaded favicon. Dropping onto the playlist itself is not possible for a component; use the window above.
+
+The built-in Album Art Viewer may cache artwork and might need a track change or refresh to show a new logo.				
 ## Technical notes and limitations
 
 - Stream decoding is delegated to foobar2000's URL/file and input-decoder services.
@@ -326,7 +354,9 @@ The source is split into several files, all of which belong to the component:
 - `utag_component.cpp`: component name, version and description, filename check
 - `utag_input.cpp`: the input (reading `.utag` files, tagging, playback)
 - `utag_album_art.cpp`: artwork extractor and editor
-- `utag_favicon.cpp`, `utag_handoff.cpp`: favicon download; stream handoff and technical-info cache
+- `utag_favicon.cpp`, `utag_handoff.cpp`: favicon download and sidecar image helpers; stream handoff and technical-info cache
+- `utag_artwork.cpp`: manual station logos and the Station logo window
+- `utag_fileops.cpp`: moves, copies and deletes logo images along with their `.utag` files
 - `utag_context_menu.cpp`, `utag_mainmenu.cpp`: playlist context menu (create utag files, Radio Browser tagging) and File menu commands
 - `utag_add_station.cpp`: add a station by URL
 - `utag_radio_browser.cpp`, `utag_radio_browse.cpp`: Radio Browser import, browse and lookup by URL

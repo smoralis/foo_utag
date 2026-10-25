@@ -21,6 +21,7 @@ namespace
     constexpr int kPrefPlRadioBrowser = 2009;
     constexpr int kPrefPlTunein = 2010;
     constexpr int kPrefPlIcecast = 2011;
+    constexpr int kPrefLogoFileOps = 2012;
 
     // {85C77DE3-3774-474F-A8EA-87564A3BBDE9}
     static const GUID g_guid_prefs_page =
@@ -42,14 +43,17 @@ namespace
             constexpr WORD kStatic = 0x0082;
 
             constexpr DWORD kGroup = BS_GROUPBOX;
+            // BS_NOTIFY: focus notifications, so tabbing to a control that is
+            // scrolled out of view scrolls it into view.
             constexpr DWORD kCheck =
-                BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP;
+                BS_AUTOCHECKBOX | BS_MULTILINE | BS_NOTIFY | WS_TABSTOP;
 
-            // Compact page. No vertical scrollbar is used.
+            // The page keeps a fixed design height; a vertical scrollbar appears
+            // when the host window is shorter than that.
             dialog_template t;
             t.begin(
-                WS_CHILD | DS_CONTROL,
-                0, 0, 280, 300,
+                WS_CHILD | DS_CONTROL | WS_VSCROLL,
+                0, 0, 280, 314,
                 L"", L"Segoe UI", 8);
 
             // Playback
@@ -79,7 +83,7 @@ namespace
                 ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
                 8, 79, 198, 15, kPrefFolder, L"");
 
-            t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP,
+            t.item(kButton, BS_PUSHBUTTON | BS_NOTIFY | WS_TABSTOP,
                 212, 77, 60, 19, kPrefBrowse, L"Browse...");
 
             // Messages
@@ -131,11 +135,20 @@ namespace
                 74, 243, 198, 11, kPrefPlTunein, L"");
 
             t.item(kStatic, SS_LEFT,
-                8, 259, 62, 15, 0xFFFF, L"Icecast:");
+                8, 259, 62, 11, 0xFFFF, L"Icecast:");
 
             t.item(kEdit,
                 ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
                 74, 257, 198, 11, kPrefPlIcecast, L"");
+
+            // Station logos
+            t.item(kButton, kGroup,
+                0, 274, 280, 36, 0xFFFF, L"Station logos");
+
+            t.item(kButton, kCheck,
+                8, 284, 264, 24, kPrefLogoFileOps,
+                L"Move, copy and delete the logo image together with its "
+                L".utag file when foobar2000 moves, copies or deletes it");
 
             m_hwnd = CreateDialogIndirectParamW(
                 core_api::get_my_instance(),
@@ -176,6 +189,7 @@ namespace
             g_cfg_result_popups = checked(kPrefPopups);
             g_cfg_tunein_details = checked(kPrefTuneinDetails);
             g_cfg_ctx_rb_lookup = checked(kPrefCtxLookup);
+            g_cfg_logo_fileops = checked(kPrefLogoFileOps);
 
             g_cfg_playlist_radiobrowser.set_string(
                 playlist_utf8(kPrefPlRadioBrowser).c_str());
@@ -199,6 +213,7 @@ namespace
             set_checked(kPrefPopups, true);
             set_checked(kPrefTuneinDetails, false);
             set_checked(kPrefCtxLookup, true);
+            set_checked(kPrefLogoFileOps, true);
 
             SetDlgItemTextW(m_hwnd, kPrefPlRadioBrowser, L"RadioBrowser");
             SetDlgItemTextW(m_hwnd, kPrefPlTunein, L"Tunein");
@@ -245,6 +260,7 @@ namespace
                 checked(kPrefPopups) != static_cast<bool>(g_cfg_result_popups) ||
                 checked(kPrefTuneinDetails) != static_cast<bool>(g_cfg_tunein_details) ||
                 checked(kPrefCtxLookup) != static_cast<bool>(g_cfg_ctx_rb_lookup) ||
+                checked(kPrefLogoFileOps) != static_cast<bool>(g_cfg_logo_fileops) ||
                 playlist_utf8(kPrefPlRadioBrowser) !=
                 std::string(g_cfg_playlist_radiobrowser.get_ptr()) ||
                 playlist_utf8(kPrefPlTunein) !=
@@ -265,6 +281,7 @@ namespace
             set_checked(kPrefPopups, g_cfg_result_popups);
             set_checked(kPrefTuneinDetails, g_cfg_tunein_details);
             set_checked(kPrefCtxLookup, g_cfg_ctx_rb_lookup);
+            set_checked(kPrefLogoFileOps, g_cfg_logo_fileops);
 
             try
             {
@@ -318,8 +335,10 @@ namespace
         }
 
         // ---------------------------------------------------------------------
-        // Layout: no scrollbar. Controls stretch horizontally and sections
-        // expand vertically when the host provides more room.
+        // Layout: controls stretch horizontally with the page width, and check
+        // boxes / labels take the height their text needs, so the page is as
+        // compact as the text allows. Only when that is still taller than the
+        // host window does it scroll (scrollbar, mouse wheel, tabbing).
         // ---------------------------------------------------------------------
         enum class resize_kind
         {
@@ -333,6 +352,14 @@ namespace
             HWND hwnd;
             RECT rc;
             resize_kind kind;
+            bool group = false; // group box: grows with the rows inside it
+            bool check = false; // check box: wraps its text, glyph on the left
+            bool flow = false;  // height follows the wrapped text
+        };
+
+        struct placed
+        {
+            int x, y, w, h; // unscrolled client coordinates
         };
 
         void capture_layout()
@@ -342,6 +369,7 @@ namespace
 
             m_designW = client.right;
             m_designH = client.bottom;
+            m_contentH = 0;
             m_ctrls.clear();
 
             for (HWND c = GetWindow(m_hwnd, GW_CHILD);
@@ -383,7 +411,22 @@ namespace
                     kind = resize_kind::stretch;
                 }
 
-                m_ctrls.push_back({ c, r, kind });
+                ctrl_info info{ c, r, kind };
+
+                if (_wcsicmp(cls, L"Button") == 0)
+                {
+                    const LONG type = style & BS_TYPEMASK;
+                    info.group = (type == BS_GROUPBOX);
+                    info.check = (type == BS_AUTOCHECKBOX || type == BS_CHECKBOX);
+                }
+
+                // Rows whose text may wrap: check boxes and wide labels.
+                info.flow = info.check ||
+                    (_wcsicmp(cls, L"Static") == 0 &&
+                        (r.right - r.left) > m_designW / 2);
+
+                m_ctrls.push_back(info);
+                m_contentH = (std::max)(m_contentH, static_cast<int>(r.bottom) + 6);
             }
         }
 
@@ -415,7 +458,7 @@ namespace
 
         void update_scrollbar_theme()
         {
-            // No scrollbar is used. Keep the page's existing dark-mode hooks.
+            // Theme the page (and its scrollbar) to match foobar2000's mode.
             const bool dark = page_is_dark();
 
             if (m_themeSet && dark == m_darkTheme)
@@ -430,6 +473,101 @@ namespace
                 nullptr);
         }
 
+        // Computes where every control goes for a page `width` pixels wide.
+        // Check boxes and wide labels get the height their wrapped text needs
+        // (one line when it fits, more when the page is narrow); controls
+        // below shift up or down accordingly and group boxes grow or shrink
+        // with the rows inside them. Returns the total content height.
+        int plan(int width, std::vector<placed>& out)
+        {
+            const int deltaW = width - m_designW;
+            const size_t n = m_ctrls.size();
+            out.assign(n, placed{ 0, 0, 0, 0 });
+            std::vector<int> delta(n, 0);
+
+            HDC dc = GetDC(m_hwnd);
+
+            for (size_t i = 0; i < n; ++i)
+            {
+                const ctrl_info& c = m_ctrls[i];
+                int x = c.rc.left;
+                int w = c.rc.right - c.rc.left;
+                int h = c.rc.bottom - c.rc.top;
+
+                if (c.kind == resize_kind::stretch)
+                    w = (std::max)(w + deltaW, 40);
+                else if (c.kind == resize_kind::shift)
+                    x += deltaW;
+
+                if (c.flow && dc)
+                {
+                    const HFONT font = reinterpret_cast<HFONT>(
+                        SendMessageW(c.hwnd, WM_GETFONT, 0, 0));
+                    const HGDIOBJ old = SelectObject(dc,
+                        font ? static_cast<HGDIOBJ>(font)
+                        : GetStockObject(DEFAULT_GUI_FONT));
+
+                    wchar_t text[512]{};
+                    const int len = GetWindowTextW(c.hwnd, text, 512);
+
+                    // Leave room for the check box glyph.
+                    RECT r{ 0, 0, (std::max)(w - (c.check ? 20 : 0), 20), 0 };
+                    DrawTextW(dc, text, len, &r,
+                        DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+                    SelectObject(dc, old);
+
+                    const int needed = static_cast<int>(r.bottom - r.top) + (c.check ? 6 : 2);
+                    const int newH = (std::max)(needed, c.check ? 18 : 12);
+                    delta[i] = newH - h;
+                    h = newH;
+                }
+
+                out[i] = placed{ x, c.rc.top, w, h };
+            }
+
+            if (dc)
+                ReleaseDC(m_hwnd, dc);
+
+            int bottom = 0;
+            for (size_t i = 0; i < n; ++i)
+            {
+                const ctrl_info& c = m_ctrls[i];
+                int shiftY = 0;
+                int grow = 0;
+
+                for (size_t j = 0; j < n; ++j)
+                {
+                    if (j == i || delta[j] == 0)
+                        continue;
+
+                    const ctrl_info& f = m_ctrls[j];
+
+                    // A row that ends above this control moves it.
+                    if (f.rc.bottom <= c.rc.top)
+                        shiftY += delta[j];
+
+                    // A row inside this group box resizes the box.
+                    if (c.group && f.rc.top >= c.rc.top && f.rc.bottom <= c.rc.bottom)
+                        grow += delta[j];
+                }
+
+                out[i].y += shiftY;
+                out[i].h += grow;
+                bottom = (std::max)(bottom, out[i].y + out[i].h);
+            }
+
+            return bottom + 6;
+        }
+
+        bool scrollbar_visible() const
+        {
+            SCROLLBARINFO sbi{};
+            sbi.cbSize = sizeof(sbi);
+            if (!GetScrollBarInfo(m_hwnd, OBJID_VSCROLL, &sbi))
+                return false;
+            return (sbi.rgstate[0] & STATE_SYSTEM_INVISIBLE) == 0;
+        }
+
         void layout()
         {
             if (!m_hwnd || m_designW <= 0 || m_inLayout)
@@ -440,61 +578,55 @@ namespace
             RECT rc{};
             GetClientRect(m_hwnd, &rc);
 
-            // Explicitly disable the vertical scrollbar.
-            ShowScrollBar(m_hwnd, SB_VERT, FALSE);
+            const int viewH = static_cast<int>(rc.bottom);
+            const int barW = GetSystemMetrics(SM_CXVSCROLL);
+            const int fullW = static_cast<int>(rc.right) +
+                (scrollbar_visible() ? barW : 0);
 
-            const int deltaW = rc.right - m_designW;
-            const int deltaH = rc.bottom - m_designH;
+            // First try without a scrollbar: after the rows have been resized
+            // to their text, everything may fit. Only when it does not, plan
+            // again for the narrower page that a scrollbar leaves.
+            int width = fullW;
+            m_contentH = plan(width, m_placed);
+            if (m_contentH > viewH)
+            {
+                width = fullW - barW;
+                m_contentH = plan(width, m_placed);
+            }
 
-            // Distribute additional height among the section group boxes.
-            // Children keep their vertical positions and sizes so that
-            // compact layouts remain predictable at smaller heights.
-            const int sectionCount = 5;
-            const int extraPerSection =
-                deltaH > 0 ? deltaH / sectionCount : 0;
+            const int maxScroll = (std::max)(0, m_contentH - viewH);
+            m_scrollPos = (std::min)((std::max)(m_scrollPos, 0), maxScroll);
+
+            SCROLLINFO si{};
+            si.cbSize = sizeof(si);
+            si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+            si.nMin = 0;
+            si.nMax = (std::max)(m_contentH - 1, 0);
+            si.nPage = static_cast<UINT>((std::max)(viewH, 0));
+            si.nPos = m_scrollPos;
+            SetScrollInfo(m_hwnd, SB_VERT, &si, TRUE);
 
             HDWP defer =
                 BeginDeferWindowPos(
                     static_cast<int>(m_ctrls.size()));
 
-            int sectionIndex = 0;
-
-            for (const auto& c : m_ctrls)
+            for (size_t i = 0; i < m_ctrls.size(); ++i)
             {
-                int x = c.rc.left;
-                int y = c.rc.top;
-                int w = c.rc.right - c.rc.left;
-                int h = c.rc.bottom - c.rc.top;
-
-                if (c.kind == resize_kind::stretch)
-                    w = (std::max)(w + deltaW, 40);
-                else if (c.kind == resize_kind::shift)
-                    x += deltaW;
-
-                // Expand group boxes vertically when space is available.
-                wchar_t cls[16]{};
-                GetClassNameW(c.hwnd, cls, 16);
-
-                if (_wcsicmp(cls, L"Button") == 0 &&
-                    (GetWindowLongW(c.hwnd, GWL_STYLE) & BS_TYPEMASK)
-                    == BS_GROUPBOX)
-                {
-                    h += extraPerSection;
-                    ++sectionIndex;
-                }
+                const placed& p = m_placed[i];
+                const int y = p.y - m_scrollPos;
 
                 if (defer)
                 {
                     defer = DeferWindowPos(
-                        defer, c.hwnd, nullptr,
-                        x, y, w, h,
+                        defer, m_ctrls[i].hwnd, nullptr,
+                        p.x, y, p.w, p.h,
                         SWP_NOZORDER | SWP_NOACTIVATE);
                 }
                 else
                 {
                     SetWindowPos(
-                        c.hwnd, nullptr,
-                        x, y, w, h,
+                        m_ctrls[i].hwnd, nullptr,
+                        p.x, y, p.w, p.h,
                         SWP_NOZORDER | SWP_NOACTIVATE);
                 }
             }
@@ -503,9 +635,100 @@ namespace
                 EndDeferWindowPos(defer);
 
             update_scrollbar_theme();
-            InvalidateRect(m_hwnd, nullptr, TRUE);
+            RedrawWindow(m_hwnd, nullptr, nullptr,
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 
             m_inLayout = false;
+        }
+
+        // Scrolls by moving the existing pixels and child windows
+        // (ScrollWindowEx) instead of re-laying-out and repainting every
+        // control, which is what made the page flash.
+        void scroll_to(int pos)
+        {
+            RECT rc{};
+            GetClientRect(m_hwnd, &rc);
+            const int viewH = static_cast<int>(rc.bottom); // RECT members are LONG
+            const int maxScroll = (std::max)(0, m_contentH - viewH);
+            pos = (std::min)((std::max)(pos, 0), maxScroll);
+
+            const int delta = m_scrollPos - pos;
+            if (delta == 0)
+                return;
+
+            m_scrollPos = pos;
+            SetScrollPos(m_hwnd, SB_VERT, pos, TRUE);
+
+            ScrollWindowEx(m_hwnd, 0, delta,
+                nullptr, nullptr, nullptr, nullptr,
+                SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE);
+            UpdateWindow(m_hwnd);
+        }
+
+        void on_vscroll(UINT code)
+        {
+            SCROLLINFO si{};
+            si.cbSize = sizeof(si);
+            si.fMask = SIF_ALL;
+            GetScrollInfo(m_hwnd, SB_VERT, &si);
+
+            const int page = static_cast<int>(si.nPage);
+            int pos = m_scrollPos;
+
+            switch (code)
+            {
+            case SB_LINEUP:        pos -= 16; break;
+            case SB_LINEDOWN:      pos += 16; break;
+            case SB_PAGEUP:        pos -= page; break;
+            case SB_PAGEDOWN:      pos += page; break;
+            case SB_THUMBTRACK:
+            case SB_THUMBPOSITION: pos = si.nTrackPos; break;
+            case SB_TOP:           pos = 0; break;
+            case SB_BOTTOM:        pos = m_contentH; break;
+            default:               return;
+            }
+
+            scroll_to(pos);
+        }
+
+        void on_mouse_wheel(int delta)
+        {
+            RECT rc{};
+            GetClientRect(m_hwnd, &rc);
+            if (m_contentH <= rc.bottom)
+                return; // everything fits
+
+            UINT lines = 3;
+            SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+
+            const int step = (lines == WHEEL_PAGESCROLL)
+                ? rc.bottom
+                : static_cast<int>(lines) * 16;
+
+            scroll_to(m_scrollPos - MulDiv(delta, step, WHEEL_DELTA));
+        }
+
+        // Scrolls so that the focused control is fully visible.
+        void ensure_visible(HWND control)
+        {
+            RECT rc{};
+            GetClientRect(m_hwnd, &rc);
+            const int viewH = static_cast<int>(rc.bottom);
+
+            for (size_t i = 0; i < m_ctrls.size() && i < m_placed.size(); ++i)
+            {
+                if (m_ctrls[i].hwnd != control)
+                    continue;
+
+                const int top = m_placed[i].y;
+                const int bottom = top + m_placed[i].h;
+
+                if (top - 4 < m_scrollPos)
+                    scroll_to(top - 4);
+                else if (bottom + 4 > m_scrollPos + viewH)
+                    scroll_to(bottom + 4 - viewH);
+                return;
+            }
         }
 
         void browse() const
@@ -542,6 +765,16 @@ namespace
                 self->m_hwnd = dlg;
                 self->m_darkHooks.AddDialogWithControls(dlg);
 
+                // WS_VSCROLL shows a bar from the start; hide it so the design
+                // width is measured without it. layout() shows it when needed.
+                ShowScrollBar(dlg, SB_VERT, FALSE);
+
+                // Double-buffer the page and its children so scrolling does not
+                // flash. If this causes odd painting on some setup, remove it;
+                // the ScrollWindowEx scrolling still works without it.
+                SetWindowLongPtrW(dlg, GWL_EXSTYLE,
+                    GetWindowLongPtrW(dlg, GWL_EXSTYLE) | WS_EX_COMPOSITED);
+
                 self->capture_layout();
                 self->load_values();
 
@@ -552,9 +785,32 @@ namespace
                     self->layout();
                 return TRUE;
 
+            case WM_VSCROLL:
+                if (self)
+                {
+                    self->on_vscroll(LOWORD(wp));
+                    return TRUE;
+                }
+                break;
+
+            case WM_MOUSEWHEEL:
+                if (self)
+                {
+                    self->on_mouse_wheel(GET_WHEEL_DELTA_WPARAM(wp));
+                    return TRUE;
+                }
+                break;
+
             case WM_COMMAND:
                 if (!self || self->m_loading)
                     break;
+
+                // A control got keyboard focus: bring it into view.
+                if (HIWORD(wp) == BN_SETFOCUS || HIWORD(wp) == EN_SETFOCUS)
+                {
+                    self->ensure_visible(reinterpret_cast<HWND>(lp));
+                    break;
+                }
 
                 switch (LOWORD(wp))
                 {
@@ -569,6 +825,7 @@ namespace
                 case kPrefPopups:
                 case kPrefTuneinDetails:
                 case kPrefCtxLookup:
+                case kPrefLogoFileOps:
                     if (HIWORD(wp) == BN_CLICKED)
                         self->m_callback->on_state_changed();
                     break;
@@ -604,6 +861,9 @@ namespace
 
         int m_designW = 0;
         int m_designH = 0;
+        int m_contentH = 0;  // height of all controls, unscrolled
+        std::vector<placed> m_placed; // last computed positions, unscrolled
+        int m_scrollPos = 0; // vertical scroll offset in pixels
 
         std::vector<ctrl_info> m_ctrls;
 

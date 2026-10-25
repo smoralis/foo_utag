@@ -35,63 +35,140 @@ std::string favicon_extension_for_url(const std::string& url)
     return extension;
 }
 
-static bool is_image_file_by_magic(const std::wstring& path)
+// Sniffs the leading bytes of a file and returns the extension (with leading
+// dot, lowercase) that matches the image format, or an empty string when the
+// file is not a recognized image. Used to validate downloads and manually
+// assigned logos, and to name the sidecar after what the file really is.
+std::wstring image_extension_by_magic(const std::wstring& path)
 {
-    // Read a few leading bytes and check common image signatures.
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
+    if (h == INVALID_HANDLE_VALUE) return {};
 
     unsigned char buf[512] = { 0 };
     DWORD got = 0;
     const BOOL ok = ReadFile(h, buf, sizeof(buf), &got, nullptr);
     CloseHandle(h);
-    if (!ok || got == 0) return false;
+    if (!ok || got == 0) return {};
 
     // PNG: 89 50 4E 47 0D 0A 1A 0A
     if (got >= 8 &&
         buf[0] == 0x89 && buf[1] == 'P' && buf[2] == 'N' && buf[3] == 'G' &&
         buf[4] == 0x0D && buf[5] == 0x0A && buf[6] == 0x1A && buf[7] == 0x0A)
-        return true;
+        return L".png";
 
     // JPEG: FF D8 FF
     if (got >= 3 && buf[0] == 0xFF && buf[1] == 0xD8 && buf[2] == 0xFF)
-        return true;
+        return L".jpg";
 
     // GIF: "GIF87a" or "GIF89a"
     if (got >= 6 && buf[0] == 'G' && buf[1] == 'I' && buf[2] == 'F' &&
         buf[3] == '8' && (buf[4] == '7' || buf[4] == '9') && buf[5] == 'a')
-        return true;
+        return L".gif";
 
     // BMP: 'B' 'M'
     if (got >= 2 && buf[0] == 'B' && buf[1] == 'M')
-        return true;
+        return L".bmp";
 
-    // WebP: "RIFF"...."WEBP" (bytes 0..3 == 'R','I','F','F' and 8..11 == 'W','E','B','P')
+    // WebP: "RIFF"....  "WEBP"
     if (got >= 12 &&
         buf[0] == 'R' && buf[1] == 'I' && buf[2] == 'F' && buf[3] == 'F' &&
         buf[8] == 'W' && buf[9] == 'E' && buf[10] == 'B' && buf[11] == 'P')
-        return true;
+        return L".webp";
 
-    // Heuristic fallback: SVG / XML (starts with '<') - treat as image if it looks like an SVG tag.
-    if (buf[0] == '<')
+    // SVG: skip an optional UTF-8 BOM, then require a real <svg element. A
+    // bare "<?xml" is often an XML or HTML error page (e.g. a 404) and must
+    // not be saved as artwork.
+    size_t offset = 0;
+    if (got >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF)
+        offset = 3;
+    if (got > offset && buf[offset] == '<')
     {
-        // Accept only a real <svg> element. A bare "<?xml" is often an XML or
-        // HTML error page (e.g. a 404) and must not be saved as artwork.
-        const std::string s(reinterpret_cast<char*>(buf), static_cast<size_t>(got));
-        if (s.find("<svg") != std::string::npos) return true;
+        const std::string text(reinterpret_cast<char*>(buf) + offset,
+            static_cast<size_t>(got) - offset);
+        if (text.find("<svg") != std::string::npos) return L".svg";
     }
 
-    // NOTE: ICO support intentionally removed - do not accept ICO signature.
-
-    return false;
+    // NOTE: ICO support intentionally not accepted.
+    return {};
 }
 
+// The sidecar image sits beside the .utag file: same folder, same basename.
+static const wchar_t* const kSidecarExtensions[] = {
+    L".png", L".jpg", L".jpeg", L".gif", L".bmp", L".webp", L".svg"
+};
+
+std::wstring station_artwork_stem(const std::string& utagPath)
+{
+    try
+    {
+        const std::wstring wide = utf8_to_wide(to_native_windows_path(utagPath));
+        const size_t slash = wide.find_last_of(L"\\/");
+        const size_t dot = wide.find_last_of(L'.');
+        if (dot == std::wstring::npos ||
+            (slash != std::wstring::npos && dot < slash))
+            return {};
+        return wide.substr(0, dot);
+    }
+    catch (...)
+    {
+        return {};
+    }
+}
+
+// Returns the sidecar image of a .utag file (a manually assigned logo or a
+// downloaded favicon - both are the same kind of file), or an empty string.
+// The sidecar's extension does not have to match the "favicon" URL, and the
+// "favicon" key does not have to exist. Should several candidates exist, the
+// most recently written one wins.
+std::wstring find_station_artwork(const std::string& utagPath)
+{
+    const std::wstring stem = station_artwork_stem(utagPath);
+    if (stem.empty()) return {};
+
+    std::wstring best;
+    FILETIME bestTime = {};
+    for (const wchar_t* ext : kSidecarExtensions)
+    {
+        const std::wstring candidate = stem + ext;
+        WIN32_FILE_ATTRIBUTE_DATA data = {};
+        if (!GetFileAttributesExW(candidate.c_str(), GetFileExInfoStandard, &data))
+            continue;
+        if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            continue;
+        if (best.empty() || CompareFileTime(&data.ftLastWriteTime, &bestTime) > 0)
+        {
+            best = candidate;
+            bestTime = data.ftLastWriteTime;
+        }
+    }
+    return best;
+}
+
+// Deletes every sidecar image of a .utag file except `keep` (may be empty).
+// Returns how many files were deleted.
+unsigned delete_station_artwork_except(const std::string& utagPath, const std::wstring& keep)
+{
+    const std::wstring stem = station_artwork_stem(utagPath);
+    if (stem.empty()) return 0;
+
+    unsigned removed = 0;
+    for (const wchar_t* ext : kSidecarExtensions)
+    {
+        const std::wstring candidate = stem + ext;
+        if (!keep.empty() && _wcsicmp(candidate.c_str(), keep.c_str()) == 0)
+            continue;
+        if (DeleteFileW(candidate.c_str()))
+            ++removed;
+    }
+    return removed;
+}
 
 // Ask foobar2000 to refresh the .utag metadata after its favicon sidecar
 // has been successfully published. This gives artwork viewers a chance to
 // query the extractor again; it is intentionally never called on download failure.
-static void notify_utag_artwork_changed(const std::string& utagPath)
+void notify_utag_artwork_changed(const std::string& utagPath)
 {
     try
     {
@@ -130,6 +207,11 @@ void schedule_favicon_download_for_playback(
 
     const std::string url = it->get<std::string>();
     if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0)
+        return;
+
+    // Any existing sidecar - including a manually assigned logo - wins over a
+    // downloaded favicon.
+    if (!find_station_artwork(utagPath).empty())
         return;
 
     try
@@ -195,8 +277,14 @@ void schedule_favicon_download_for_playback(
 
                 if (SUCCEEDED(hr))
                 {
+                    // A logo may have been assigned while the download ran.
+                    if (!find_station_artwork(utagPath).empty())
+                    {
+                        UTAG_LOG("[foo_utag] a logo was assigned meanwhile, discarding favicon download");
+                        DeleteFileW(tempPath.c_str());
+                    }
                     // Validate that the downloaded file actually looks like an image.
-                    if (!is_image_file_by_magic(tempPath))
+                    else if (image_extension_by_magic(tempPath).empty())
                     {
                         UTAG_LOG("[foo_utag] downloaded file is not a recognized image, discarding: %s",
                             pfc::stringcvt::string_utf8_from_wide(tempPath.c_str()).get_ptr());
