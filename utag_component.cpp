@@ -2,7 +2,7 @@
 
 DECLARE_COMPONENT_VERSION(
     "utag Input",
-    "1.0.12",
+    "1.0.13",
     "Adds internet radio streams and other remote URLs to the Media Library.\n"
     "\n"
     "Each .utag file is a small JSON stub that stores a stream URL (\"@\") together\n"
