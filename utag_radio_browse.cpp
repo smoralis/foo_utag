@@ -448,7 +448,7 @@ namespace
             : std::string("Radio Browser");
 
         const size_t count = stations.size();
-        radio_start_import_stations(description, std::move(stations), parentFolder);
+        radio_start_import_stations("Radio Browser", description, std::move(stations), parentFolder, true);
         set_status(dlg, "Importing " + std::to_string(count) + " station(s)...");
     }
 

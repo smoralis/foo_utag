@@ -21,6 +21,22 @@ bool prompt_text(HWND owner, const wchar_t* title, const wchar_t* label, std::st
 // short `summary` to the console (the details too if console logging is on).
 // Errors are not reported through this: they always get a popup.
 void report_result(const char* title, const std::string& details, const std::string& summary);
+
+// Import playlist used by the "Import from..." commands: a NEW playlist named
+// like the search folder (search term and date). Returns a one-line note for
+// the results log. Main thread only.
+std::string add_to_new_folder_playlist(const std::wstring& folder,
+    const std::vector<std::string>& createdPaths, HWND owner);
+
+// Service playlists, used by the browse windows only (names are set in
+// preferences; defaults RadioBrowser, Tunein, Icecast). Appends `createdPaths` (the new .utag files) to the
+// service's playlist, creating it when missing, and makes it active. Returns a
+// one-line note for the results log. Main thread only.
+enum class utag_service { radio_browser, tunein, icecast };
+const char* utag_default_playlist_name(utag_service service);
+std::string add_to_service_playlist(utag_service service,
+    const std::vector<std::string>& createdPaths, HWND owner);
+
 bool create_search_folder(const std::wstring& parent, const std::string& description,
     std::wstring& folder, DWORD& error);
 
@@ -30,6 +46,7 @@ void utag_import_from_radio_browser(HWND owner);
 void utag_open_tunein_dialog(HWND owner);   // utag_tunein.cpp (search import)
 void utag_open_tunein_browser(HWND owner);  // utag_tunein_browser.cpp
 void utag_open_radio_browse(HWND owner);    // utag_radio_browse.cpp
+void utag_open_icecast_browse(HWND owner);  // utag_icecast_browse.cpp
 
 // Small in-memory dialog template (no .rc file needed).
 class dialog_template

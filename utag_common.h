@@ -45,8 +45,13 @@ extern cfg_bool g_cfg_favicon;
 extern cfg_bool g_cfg_logging;
 extern cfg_bool g_cfg_result_popups;
 extern cfg_bool g_cfg_tunein_details;
+extern cfg_bool g_cfg_add_rb_lookup;
+extern cfg_bool g_cfg_ctx_rb_lookup;
 extern cfg_string g_cfg_default_dir;
 extern cfg_string g_cfg_tunein_username;
+extern cfg_string g_cfg_playlist_radiobrowser;
+extern cfg_string g_cfg_playlist_tunein;
+extern cfg_string g_cfg_playlist_icecast;
 
 bool handoff_enabled();
 bool favicon_download_enabled();

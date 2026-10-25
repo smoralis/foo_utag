@@ -339,6 +339,7 @@ namespace
             m_candidates(std::move(candidates)),
             m_parent(std::move(parentFolder)),
             m_details(g_cfg_tunein_details) {
+            m_browseWindow = true; // browser window: service playlist
         }
 
         // Search first, then import the stations found (search window).
@@ -398,46 +399,11 @@ namespace
                 return;
             }
 
-            // Put the new files into a playlist named like the output folder.
-            std::string playlistNote;
-            if (!m_createdPaths.empty())
-            {
-                try
-                {
-                    const size_t slash = m_folder.find_last_of(L"\\/");
-                    const std::string playlistName = wide_to_utf8(
-                        slash == std::wstring::npos ? m_folder : m_folder.substr(slash + 1));
-
-                    std::vector<pfc::string8> canonical;
-                    canonical.reserve(m_createdPaths.size());
-                    for (const auto& path : m_createdPaths)
-                    {
-                        pfc::string8 canonicalPath;
-                        filesystem::g_get_canonical_path(path.c_str(), canonicalPath);
-                        canonical.push_back(canonicalPath);
-                    }
-
-                    pfc::list_t<const char*> locations;
-                    for (const auto& path : canonical)
-                        locations.add_item(path.get_ptr());
-
-                    static_api_ptr_t<playlist_manager> playlists;
-                    const t_size index = playlists->create_playlist(
-                        playlistName.c_str(), playlistName.length(), pfc_infinite);
-                    if (index == pfc_infinite)
-                        throw std::runtime_error("playlist creation failed");
-
-                    playlists->set_active_playlist(index);
-                    playlists->playlist_add_locations(index, locations, true, owner);
-
-                    playlistNote = "Playlist: " + playlistName + " (" +
-                        std::to_string(m_createdPaths.size()) + " entries)";
-                }
-                catch (const std::exception& e)
-                {
-                    playlistNote = std::string("Could not create the playlist: ") + e.what();
-                }
-            }
+            // Browser window: append to the TuneIn playlist (set in preferences).
+            // Search import: new playlist named like the search folder.
+            const std::string playlistNote = m_browseWindow
+                ? add_to_service_playlist(utag_service::tunein, m_createdPaths, owner)
+                : add_to_new_folder_playlist(m_folder, m_createdPaths, owner);
 
             std::ostringstream results;
             results << "Import stations from TuneIn - Results"
@@ -695,6 +661,7 @@ namespace
         std::string m_info;
         std::vector<std::string> m_logEntries;
         std::vector<std::string> m_createdPaths; // for the playlist
+        bool m_browseWindow = false;
         size_t m_loggedCount = 0;
         unsigned m_created = 0;
         unsigned m_skipped = 0;

@@ -73,3 +73,36 @@ static const GUID g_guid_cfg_tunein_details =
 
 // TuneIn import: look up location, description, genre and region per station.
 cfg_bool g_cfg_tunein_details(g_guid_cfg_tunein_details, false);
+
+// {86F235C6-6F5A-4CB4-A1C4-E2ECC4F773AD}
+static const GUID g_guid_cfg_add_rb_lookup =
+{ 0x86f235c6, 0x6f5a, 0x4cb4, { 0xa1, 0xc4, 0xe2, 0xec, 0xc4, 0xf7, 0x73, 0xad } };
+
+// "Add internet radio url" window: look the URL up in Radio Browser first.
+cfg_bool g_cfg_add_rb_lookup(g_guid_cfg_add_rb_lookup, false);
+
+// {B2E4A7D1-5C38-4F69-8A0E-93D61F7C25B4}
+static const GUID g_guid_cfg_ctx_rb_lookup =
+{ 0xb2e4a7d1, 0x5c38, 0x4f69, { 0x8a, 0x0e, 0x93, 0xd6, 0x1f, 0x7c, 0x25, 0xb4 } };
+
+// "Create utag files" playlist commands: look each URL up in Radio Browser
+// first (same lookup as the "Add internet radio url" window).
+cfg_bool g_cfg_ctx_rb_lookup(g_guid_cfg_ctx_rb_lookup, true);
+
+// Playlists that the Radio Browser, TuneIn and Icecast imports append their
+// results to (created when missing). An empty value means the default name.
+// {5E1B8C42-7A93-4D05-B6F8-0C2D49E7A316}
+static const GUID g_guid_cfg_playlist_radiobrowser =
+{ 0x5e1b8c42, 0x7a93, 0x4d05, { 0xb6, 0xf8, 0x0c, 0x2d, 0x49, 0xe7, 0xa3, 0x16 } };
+
+// {C47D2A95-3E18-4B60-91F4-A8B05D6E7F23}
+static const GUID g_guid_cfg_playlist_tunein =
+{ 0xc47d2a95, 0x3e18, 0x4b60, { 0x91, 0xf4, 0xa8, 0xb0, 0x5d, 0x6e, 0x7f, 0x23 } };
+
+// {1F96E0B3-D825-4C7A-8E31-57B4C2A90D68}
+static const GUID g_guid_cfg_playlist_icecast =
+{ 0x1f96e0b3, 0xd825, 0x4c7a, { 0x8e, 0x31, 0x57, 0xb4, 0xc2, 0xa9, 0x0d, 0x68 } };
+
+cfg_string g_cfg_playlist_radiobrowser(g_guid_cfg_playlist_radiobrowser, "RadioBrowser");
+cfg_string g_cfg_playlist_tunein(g_guid_cfg_playlist_tunein, "Tunein");
+cfg_string g_cfg_playlist_icecast(g_guid_cfg_playlist_icecast, "Icecast");

@@ -2,7 +2,7 @@
 
 DECLARE_COMPONENT_VERSION(
     "utag Input",
-    "1.0.11",
+    "1.0.12",
     "Adds internet radio streams and other remote URLs to the Media Library.\n"
     "\n"
     "Each .utag file is a small JSON stub that stores a stream URL (\"@\") together\n"
@@ -29,13 +29,18 @@ DECLARE_COMPONENT_VERSION(
     "- File > Import stations from TuneIn... (search by station, artist or song)\n"
     "- File > Browse TuneIn... (categories, genres, location, language, your presets,\n"
     "  search, recommendations by artists and for the playing station)\n"
-    "- Imports run in the background into a new sub folder of the default folder and\n"
-    "  are added to a new playlist; errors are always reported\n"
+    "- Imports run in the background into a new sub folder of the default folder;\n"
+    "  errors are always reported\n"
+    "- Import from... commands put the new files in a new playlist named like the\n"
+    "  search folder (search term and date)\n"
+    "- The browse windows append to one playlist per service (default RadioBrowser,\n"
+    "  Tunein, Icecast; created when missing)\n"
     "\n"
     "Preferences (Preferences > Tools > Utag Input):\n"
     "- Reuse stream on retag, favicon download, default utag folder\n"
     "- Console messages and optional results windows after import and create commands\n"
     "- Optional TuneIn station details (location, description, genre, region) on import\n"
+    "- Names of the Radio Browser, TuneIn and Icecast browse playlists\n"
     "\n"
     "utag format: [ { \"@\": \"http://host:port/stream\", \"name\": \"Station\", ... } ]"
 );

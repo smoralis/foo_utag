@@ -1,4 +1,5 @@
 #include "utag_ui.h"
+#include "utag_radio.h"
 
 // -----------------------------------------------------------------------------
 // Main menu command: File > Add internet radio url and create utag
@@ -11,6 +12,7 @@ namespace
     constexpr int kIdUrlEdit = 1001;
     constexpr int kIdNameEdit = 1002;
     constexpr int kIdStatus = 1003;
+    constexpr int kIdLookupCheck = 1004;
 
     // The window is modeless (foobar2000 stays usable while it is open), so
     // its state lives on the heap and is freed in WM_NCDESTROY.
@@ -24,7 +26,7 @@ namespace
 
     // Defined further down: creates the .utag in the background.
     void start_station_creation(const std::wstring& url, const std::wstring& name,
-        const std::wstring& folder);
+        const std::wstring& folder, bool radioBrowserLookup);
 
     INT_PTR CALLBACK url_prompt_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     {
@@ -40,6 +42,9 @@ namespace
             // Dark mode for the dialog and all of its controls.
             state->darkHooks.AddDialogWithControls(dlg);
             modeless_dialog_manager::g_add(dlg); // Tab / Enter / Esc keys
+
+            CheckDlgButton(dlg, kIdLookupCheck,
+                g_cfg_add_rb_lookup ? BST_CHECKED : BST_UNCHECKED);
 
             SetFocus(GetDlgItem(dlg, kIdUrlEdit));
             return FALSE; // focus set manually
@@ -80,8 +85,11 @@ namespace
                 if (!haveFolder)
                     return TRUE;
 
+                const bool lookup = IsDlgButtonChecked(dlg, kIdLookupCheck) == BST_CHECKED;
+                g_cfg_add_rb_lookup = lookup; // remembered for next time
+
                 DestroyWindow(dlg);
-                start_station_creation(url, name, folder);
+                start_station_creation(url, name, folder, lookup);
                 return TRUE;
             }
 
@@ -121,16 +129,18 @@ namespace
 
         dialog_template t;
         t.begin(WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER,
-            0, 0, 260, 110, L"Add internet radio url and create utag", L"Segoe UI", 9);
+            0, 0, 260, 126, L"Add internet radio url and create utag", L"Segoe UI", 9);
         t.item(kStatic, SS_LEFT, 8, 8, 244, 10, 0xFFFF, L"Station URL:");
         t.item(kEdit, ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 8, 20, 244, 13,
             kIdUrlEdit, L"");
         t.item(kStatic, SS_LEFT, 8, 40, 244, 10, 0xFFFF, L"Station name (optional; read from stream if empty):");
         t.item(kEdit, ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 8, 52, 244, 13,
             kIdNameEdit, L"");
-        t.item(kStatic, SS_LEFT, 8, 70, 244, 10, kIdStatus, L"");
-        t.item(kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 148, 88, 50, 14, IDOK, L"Create");
-        t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 202, 88, 50, 14, IDCANCEL, L"Cancel");
+        t.item(kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 8, 70, 244, 11, kIdLookupCheck,
+            L"Search Radio Browser for this URL (use its station details)");
+        t.item(kStatic, SS_LEFT, 8, 86, 244, 10, kIdStatus, L"");
+        t.item(kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 148, 104, 50, 14, IDOK, L"Create");
+        t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 202, 104, 50, 14, IDCANCEL, L"Cancel");
 
         auto* state = new url_prompt_state;
         const HWND dlg = CreateDialogIndirectParamW(
@@ -253,9 +263,10 @@ namespace
     class add_station_task : public threaded_process_callback
     {
     public:
-        add_station_task(std::wstring url, std::wstring name, std::wstring folder)
+        add_station_task(std::wstring url, std::wstring name, std::wstring folder,
+            bool radioBrowserLookup)
             : m_wideUrl(std::move(url)), m_wideName(std::move(name)),
-            m_folder(std::move(folder)) {
+            m_folder(std::move(folder)), m_rbLookup(radioBrowserLookup) {
         }
 
         void run(threaded_process_status& status, abort_callback& abort) override
@@ -381,6 +392,39 @@ namespace
             std::string name = wide_to_utf8(m_wideName);
             bool probed = false;
 
+            // Optional: ask Radio Browser about this URL first. If it knows the
+            // station, its details become the .utag; otherwise (or if the
+            // lookup fails) carry on with the plain stream lookup below.
+            json station = json::object();
+            bool fromRadioBrowser = false;
+
+            if (m_rbLookup && !is_utag_path(m_url))
+            {
+                status.set_item("Searching Radio Browser...");
+
+                json found;
+                std::string lookupError;
+                if (radio_lookup_station_by_url(m_url, abort, found, lookupError))
+                {
+                    station = std::move(found);
+                    fromRadioBrowser = true;
+                    if (name.empty() && station.contains("name") && station["name"].is_string())
+                        name = station["name"].get<std::string>();
+                }
+                else if (!lookupError.empty())
+                {
+                    m_logEntries.emplace_back(
+                        "[NOTE] Radio Browser lookup failed (" + lookupError +
+                        "); using the stream's own details instead.");
+                }
+                else
+                {
+                    m_logEntries.emplace_back(
+                        "[NOTE] Radio Browser has no station with this URL; "
+                        "using the stream's own details instead.");
+                }
+            }
+
             // No name typed in: ask the stream for it. An unreachable server
             // (or an abort) stops here and nothing is created.
             if (name.empty() && !is_utag_path(m_url))
@@ -407,9 +451,10 @@ namespace
                 return;
             }
 
-            json station = json::object();
             station["name"] = m_label;
             station["@"] = m_url;
+            if (fromRadioBrowser)
+                station["title"] = m_label;
             const std::string contents = json::array({ station }).dump(4, ' ', false, json::error_handler_t::replace) + "\n";
 
             if (write_unique_utag(m_folder, make_safe_filename_base(m_label),
@@ -417,6 +462,7 @@ namespace
             {
                 ++m_created;
                 m_logEntries.emplace_back("[CREATED] " + m_label +
+                    (fromRadioBrowser ? " (details from Radio Browser)" : "") +
                     (probed ? " (name from stream)" : "") +
                     "\n          @  : " + m_url +
                     "\n          -> " + m_outputPath);
@@ -433,6 +479,7 @@ namespace
         std::wstring m_wideUrl;
         std::wstring m_wideName;
         std::wstring m_folder;
+        bool m_rbLookup = false;
 
         std::string m_url;
         std::string m_label;
@@ -444,10 +491,10 @@ namespace
     };
 
     void start_station_creation(const std::wstring& url, const std::wstring& name,
-        const std::wstring& folder)
+        const std::wstring& folder, bool radioBrowserLookup)
     {
         service_ptr_t<threaded_process_callback> task =
-            new service_impl_t<add_station_task>(url, name, folder);
+            new service_impl_t<add_station_task>(url, name, folder, radioBrowserLookup);
 
         // Modeless: foobar2000 stays usable; the progress window only shows up
         // when the lookup takes a moment.
@@ -455,7 +502,7 @@ namespace
             task,
             threaded_process::flag_show_abort | threaded_process::flag_show_delayed,
             core_api::get_main_window(),
-            "Looking up station name...");
+            radioBrowserLookup ? "Searching Radio Browser..." : "Looking up station name...");
     }
 }
 

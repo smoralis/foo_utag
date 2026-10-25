@@ -369,3 +369,180 @@ void report_result(const char* title, const std::string& details, const std::str
 
     console_lines(title, utag_console_logging_enabled() ? details : summary);
 }
+
+// -----------------------------------------------------------------------------
+// Service playlists
+// -----------------------------------------------------------------------------
+
+const char* utag_default_playlist_name(utag_service service)
+{
+    switch (service)
+    {
+    case utag_service::tunein:  return "Tunein";
+    case utag_service::icecast: return "Icecast";
+    default:                    return "RadioBrowser";
+    }
+}
+
+namespace
+{
+    // playlist_add_locations() works asynchronously, so the items only exist once
+    // the locations have been resolved. This notify appends them to the playlist
+    // and then focuses (and selects) the first appended item.
+    class append_and_focus_notify : public process_locations_notify
+    {
+    public:
+        explicit append_and_focus_notify(std::string playlistName)
+            : m_name(std::move(playlistName)) {
+        }
+
+        void on_completion(metadb_handle_list_cref items) override
+        {
+            if (items.get_count() == 0)
+                return;
+
+            try
+            {
+                static_api_ptr_t<playlist_manager> playlists;
+
+                // Looked up again by name: the playlist may have moved (or been
+                // removed) while the locations were being resolved.
+                const t_size index = playlists->find_or_create_playlist(
+                    m_name.c_str(), m_name.length());
+                if (index == pfc_infinite)
+                    return;
+
+                const t_size first = playlists->playlist_get_item_count(index);
+                playlists->playlist_insert_items(index, first, items, bit_array_false());
+
+                playlists->set_active_playlist(index);
+                playlists->playlist_set_focus_item(index, first);
+                playlists->playlist_set_selection(index, bit_array_true(), bit_array_one(first));
+                playlists->playlist_ensure_visible(index, first);
+            }
+            catch (...)
+            {
+            }
+        }
+
+        void on_aborted() override {}
+
+    private:
+        std::string m_name;
+    };
+}
+
+std::string add_to_service_playlist(utag_service service,
+    const std::vector<std::string>& createdPaths, HWND owner)
+{
+    std::string name;
+    switch (service)
+    {
+    case utag_service::tunein:  name = g_cfg_playlist_tunein.get_ptr(); break;
+    case utag_service::icecast: name = g_cfg_playlist_icecast.get_ptr(); break;
+    default:                    name = g_cfg_playlist_radiobrowser.get_ptr(); break;
+    }
+
+    const char* ws = " \t\r\n";
+    const size_t first = name.find_first_not_of(ws);
+    name = first == std::string::npos
+        ? std::string()
+        : name.substr(first, name.find_last_not_of(ws) - first + 1);
+    if (name.empty())
+        name = utag_default_playlist_name(service);
+
+    if (createdPaths.empty())
+        return {};
+
+    try
+    {
+        std::vector<pfc::string8> canonical;
+        canonical.reserve(createdPaths.size());
+        for (const auto& path : createdPaths)
+        {
+            pfc::string8 canonicalPath;
+            filesystem::g_get_canonical_path(path.c_str(), canonicalPath);
+            canonical.push_back(canonicalPath);
+        }
+
+        pfc::list_t<const char*> locations;
+        for (const auto& path : canonical)
+            locations.add_item(path.get_ptr());
+
+        static_api_ptr_t<playlist_manager> playlists;
+
+        // Reuse the playlist when it exists, otherwise create it; new entries
+        // are appended to whatever is already in it.
+        t_size index = playlists->find_or_create_playlist(name.c_str(), name.length());
+        if (index == pfc_infinite)
+            index = playlists->create_playlist(name.c_str(), name.length(), pfc_infinite);
+        if (index == pfc_infinite)
+            throw std::runtime_error("the playlist could not be created");
+
+        playlists->set_active_playlist(index);
+
+        // Resolve the locations in the background; when done the items are
+        // appended and the first one gets the focus.
+        process_locations_notify::ptr notify =
+            new service_impl_t<append_and_focus_notify>(name);
+
+        static_api_ptr_t<playlist_incoming_item_filter_v2> filter;
+        filter->process_locations_async(locations,
+            playlist_incoming_item_filter_v2::op_flag_no_filter |
+            playlist_incoming_item_filter_v2::op_flag_delay_ui,
+            nullptr, nullptr, owner, notify);
+
+        return "Playlist: " + name + " (" + std::to_string(createdPaths.size()) +
+            " entries appended)";
+    }
+    catch (const std::exception& e)
+    {
+        return "Could not add to the \"" + name + "\" playlist: " + e.what();
+    }
+    catch (...)
+    {
+        return "Could not add to the \"" + name + "\" playlist: unknown error.";
+    }
+}
+
+std::string add_to_new_folder_playlist(const std::wstring& folder,
+    const std::vector<std::string>& createdPaths, HWND owner)
+{
+    if (createdPaths.empty())
+        return {};
+
+    try
+    {
+        const size_t slash = folder.find_last_of(L"\\/");
+        const std::string playlistName = wide_to_utf8(
+            slash == std::wstring::npos ? folder : folder.substr(slash + 1));
+
+        std::vector<pfc::string8> canonical;
+        canonical.reserve(createdPaths.size());
+        for (const auto& path : createdPaths)
+        {
+            pfc::string8 canonicalPath;
+            filesystem::g_get_canonical_path(path.c_str(), canonicalPath);
+            canonical.push_back(canonicalPath);
+        }
+
+        pfc::list_t<const char*> locations;
+        for (const auto& path : canonical)
+            locations.add_item(path.get_ptr());
+
+        static_api_ptr_t<playlist_manager> playlists;
+        const t_size index = playlists->create_playlist(
+            playlistName.c_str(), playlistName.length(), pfc_infinite);
+        if (index == pfc_infinite)
+            throw std::runtime_error("playlist creation failed");
+        playlists->set_active_playlist(index);
+        playlists->playlist_add_locations(index, locations, true, owner);
+
+        return "Playlist: " + playlistName + " (" +
+            std::to_string(createdPaths.size()) + " entries)";
+    }
+    catch (const std::exception& e)
+    {
+        return std::string("Could not create the playlist: ") + e.what();
+    }
+}

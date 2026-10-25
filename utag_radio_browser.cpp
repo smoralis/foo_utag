@@ -1188,10 +1188,14 @@ namespace
         }
 
         // Import of stations already chosen (the browse window).
-        radio_import_task(std::string description, std::vector<json> stations,
-            std::wstring parentFolder)
-            : m_preset(true), m_description(std::move(description)),
-            m_presetStations(std::move(stations)), m_parent(std::move(parentFolder)) {
+        // `source` names the service the stations came from (used in the
+        // window titles and the results log), e.g. "Icecast Directory".
+        radio_import_task(std::string source, std::string description,
+            std::vector<json> stations, std::wstring parentFolder, bool browseWindow)
+            : m_preset(true), m_source(std::move(source)),
+            m_description(std::move(description)),
+            m_presetStations(std::move(stations)), m_parent(std::move(parentFolder)),
+            m_browseWindow(browseWindow) {
         }
 
         void run(threaded_process_status& status, abort_callback& abort) override
@@ -1216,7 +1220,7 @@ namespace
 
         void on_done(HWND, bool aborted) override
         {
-            static const char* const kTitle = "Import stations from Radio Browser";
+            const std::string kTitle = "Import stations from " + m_source;
             const HWND owner = core_api::get_main_window();
 
             if (aborted)
@@ -1227,64 +1231,33 @@ namespace
                     text = "Import cancelled; " + std::to_string(m_created) +
                         " file(s) were already created in:\r\n" + wide_to_utf8(m_folder);
                 }
-                report_result(kTitle, text, text);
+                report_result(kTitle.c_str(), text, text);
                 return;
             }
 
             if (!m_error.empty())
             {
-                popup_message::g_show(m_error.c_str(), kTitle, popup_message::icon_error);
+                popup_message::g_show(m_error.c_str(), kTitle.c_str(), popup_message::icon_error);
                 return;
             }
 
             if (!m_info.empty())
             {
-                report_result(kTitle, m_info, m_info);
+                report_result(kTitle.c_str(), m_info, m_info);
                 return;
             }
 
-            // Put the new files into a playlist named like the search folder.
-            std::string playlistNote;
-            if (!m_createdPaths.empty())
-            {
-                try
-                {
-                    const size_t slash = m_folder.find_last_of(L"\\/");
-                    const std::string playlistName = wide_to_utf8(
-                        slash == std::wstring::npos ? m_folder : m_folder.substr(slash + 1));
-
-                    std::vector<pfc::string8> canonical;
-                    canonical.reserve(m_createdPaths.size());
-                    for (const auto& path : m_createdPaths)
-                    {
-                        pfc::string8 canonicalPath;
-                        filesystem::g_get_canonical_path(path.c_str(), canonicalPath);
-                        canonical.push_back(canonicalPath);
-                    }
-
-                    pfc::list_t<const char*> locations;
-                    for (const auto& path : canonical)
-                        locations.add_item(path.get_ptr());
-
-                    static_api_ptr_t<playlist_manager> playlists;
-                    const t_size index = playlists->create_playlist(
-                        playlistName.c_str(), playlistName.length(), pfc_infinite);
-                    if (index == pfc_infinite)
-                        throw std::runtime_error("playlist creation failed");
-                    playlists->set_active_playlist(index);
-                    playlists->playlist_add_locations(index, locations, true, owner);
-
-                    playlistNote = "Playlist: " + playlistName + " (" +
-                        std::to_string(m_createdPaths.size()) + " entries)";
-                }
-                catch (const std::exception& e)
-                {
-                    playlistNote = std::string("Could not create the playlist: ") + e.what();
-                }
-            }
+            // Browse windows append to the service's playlist (set in
+            // preferences); the "Import from..." commands create a new playlist
+            // named like the search folder (search term and date).
+            const std::string playlistNote = m_browseWindow
+                ? add_to_service_playlist(
+                    m_source == "Icecast Directory" ? utag_service::icecast : utag_service::radio_browser,
+                    m_createdPaths, owner)
+                : add_to_new_folder_playlist(m_folder, m_createdPaths, owner);
 
             std::ostringstream results;
-            results << "Import stations from Radio Browser - Results"
+            results << kTitle << " - Results"
                 << "\r\n\r\n" << "Output folder: " << wide_to_utf8(m_folder)
                 << "\r\n" << "Stations returned: " << m_stationCount;
 
@@ -1311,7 +1284,7 @@ namespace
             shortSummary << "Created " << m_created << " | Skipped " << m_skipped << " | Failed " << m_failed << " - " << wide_to_utf8(m_folder);
 
             const std::string resultsText = results.str();
-            report_result(kTitle, resultsText, shortSummary.str());
+            report_result(kTitle.c_str(), resultsText, shortSummary.str());
         }
 
     private:
@@ -1456,6 +1429,8 @@ namespace
 
         radio_query m_query;
         bool m_preset = false;                  // stations given, no search
+        std::string m_source = "Radio Browser"; // service the stations come from
+        bool m_browseWindow = false; // true: service playlist; false: new playlist per import
         std::string m_description;              // folder name for a preset import
         std::vector<json> m_presetStations;
         std::wstring m_parent;
@@ -1520,20 +1495,73 @@ bool radio_pick_language(HWND owner, std::string& selected)
     return choose_radio_browser_language(owner, selected);
 }
 
-void radio_start_import_stations(const std::string& description,
-    std::vector<json> stations, const std::wstring& parentFolder)
+void radio_start_import_stations(const std::string& source,
+    const std::string& description, std::vector<json> stations,
+    const std::wstring& parentFolder, bool browseWindow)
 {
     service_ptr_t<threaded_process_callback> task =
-        new service_impl_t<radio_import_task>(description, std::move(stations), parentFolder);
+        new service_impl_t<radio_import_task>(source, description, std::move(stations),
+            parentFolder, browseWindow);
 
+    const std::string title = "Importing stations from " + source + "...";
     threaded_process::g_run_modeless(
         task,
         threaded_process::flag_show_abort | threaded_process::flag_show_progress,
         core_api::get_main_window(),
-        "Importing stations from Radio Browser...");
+        title.c_str());
 }
 
 void utag_import_from_radio_browser(HWND owner)
 {
     import_from_radio_browser(owner);
+}
+
+bool radio_lookup_station_by_url(const std::string& url, abort_callback& abort,
+    json& entry, std::string& error)
+{
+    error.clear();
+
+    std::string body;
+    if (!radio_download("/json/stations/byurl?url=" + percent_encode(url), abort, body, error))
+        return false;
+
+    const json stations = json::parse(body, nullptr, false);
+    if (stations.is_discarded() || !stations.is_array())
+    {
+        error = "Radio Browser returned an unexpected response.";
+        return false;
+    }
+
+    const auto normalize = [](std::string text)
+        {
+            text = lowercase_ascii(text);
+            while (!text.empty() && text.back() == '/')
+                text.pop_back();
+            return text;
+        };
+
+    const std::string wanted = normalize(url);
+    const json* best = nullptr;
+
+    for (const auto& station : stations)
+    {
+        if (!station.is_object() || trim_text(json_text(station, "name")).empty())
+            continue;
+
+        if (best == nullptr)
+            best = &station; // fallback: first usable result
+
+        if (normalize(json_text(station, "url")) == wanted ||
+            normalize(json_text(station, "url_resolved")) == wanted)
+        {
+            best = &station;
+            break;
+        }
+    }
+
+    if (best == nullptr)
+        return false; // not listed in Radio Browser
+
+    entry = radio_station_to_utag(*best, trim_text(json_text(*best, "name")), url);
+    return true;
 }
