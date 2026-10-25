@@ -105,7 +105,7 @@ The results popup lists the first 60 stations in detail (stream URL `@` and outp
 2. Open an entry from the home list (double-click, or press **Open**):
    - **Most clicked**, **Most voted**, **Trending now** (recently clicked) and **Recently added or changed**
    - **Tag...**, **Country...**, **Language...** and **Codec...**: each opens a list with a filter box, then shows the stations that match
-   - **Search by name...**
+   - **Search by name...**: moves to the search box at the top of the window (you can also click the box directly). Type part of a station name and press **Enter**; **Esc** clears the box. A new search while search results are showing replaces them, so **Back** still returns to the list you started from.
 3. Each station list shows up to 200 working stations, with codec, bitrate and country code. Lists are always sorted ascending by name, including the top lists.
 4. Select one or more stations and press **Import selected**, or double-click a station to import just that one. **Back** and **Home** move between lists.
 
@@ -138,8 +138,7 @@ If the details cannot be fetched for a station, the file is still created and th
    - **Local**, **Music**, **Sports**, **Talk**, **By location**, **By language**, **Best** and **Popular**
    - **Genres**
    - **My presets**: uses your TuneIn username, asked for the first time and saved. **Set TuneIn username...** changes it.
-   - **Search stations...**, **Search by artist...** and **Search by song title...**
-   - **Recommended stations for a list of artists...**: up to 10 artist names separated by commas
+   - **Search stations...**, **Search by artist...**, **Search by song title...** and **Recommended stations for a list of artists...**: these move to the search box at the top of the window and select the matching type in the drop-down next to it. You can also pick the type (**Station**, **Artist**, **Song title** or **Recommend**) yourself, type in the box and press **Enter**. For **Recommend**, enter up to 10 artist names separated by commas. **Esc** clears the box. A new search while search results are showing replaces them, so **Back** still returns to the list you started from.
    - **Recommendations for the playing station**: uses the `%stream_tunein_id%` field of the playing track, so it works for stations imported from TuneIn
 3. Entries starting with `>` open another list. Select one or more stations and press **Import selected**, or double-click a station to import just that one. **Back** and **Home** move between lists.
 
