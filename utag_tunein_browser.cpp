@@ -21,6 +21,11 @@ namespace
     constexpr int kIdTbHome = 1304;
     constexpr int kIdTbBack = 1305;
     constexpr int kIdTbImport = 1306;
+    constexpr int kIdTbMode = 1307;   // search type drop-down
+    constexpr int kIdTbSearch = 1308; // inline search box (edit control)
+
+    // Order of the entries in the search type drop-down.
+    enum search_mode { mode_station = 0, mode_artist, mode_song, mode_recommend };
 
     // Commands on the home level.
     enum home_action
@@ -40,6 +45,7 @@ namespace
     {
         std::string title;
         std::vector<tunein_entry> entries;
+        bool fromSearchBox = false; // result of a search typed in the search box
     };
 
     // The window is modeless: state lives on the heap, freed in WM_NCDESTROY.
@@ -297,8 +303,10 @@ namespace
     }
 
     // Loads `url` (modal progress window, abortable) and opens it as a new level.
-    void push_level(HWND dlg, tunein_browser_state& state,
-        const std::string& fallbackTitle, const std::string& url, bool genres)
+    // Returns true when the new level was added.
+    bool push_level(HWND dlg, tunein_browser_state& state,
+        const std::string& fallbackTitle, const std::string& url, bool genres,
+        bool fromSearchBox = false)
     {
         service_ptr_t<tunein_level_task> task =
             new service_impl_t<tunein_level_task>(url, genres);
@@ -311,21 +319,22 @@ namespace
             "Loading from TuneIn...");
 
         if (!IsWindow(dlg))
-            return;
+            return false;
 
         if (!completed)
         {
             set_status(dlg, "Cancelled.");
-            return;
+            return false;
         }
 
         if (!task->error().empty())
         {
             set_status(dlg, "Could not load this list: " + task->error());
-            return;
+            return false;
         }
 
         tunein_level level;
+        level.fromSearchBox = fromSearchBox;
         level.title = task->title().empty() ? fallbackTitle : task->title();
         level.entries = task->take_entries();
 
@@ -340,6 +349,7 @@ namespace
         state.stack.push_back(std::move(level));
         refresh(dlg, state);
         set_status(dlg, std::to_string(state.stack.back().entries.size()) + " entries.");
+        return true;
     }
 
     // ---- commands ---------------------------------------------------------------------------------
@@ -363,59 +373,117 @@ namespace
         return !user.empty();
     }
 
-    void search_prompt(HWND dlg, tunein_browser_state& state, tunein_kind kind)
+    // ---- search box -----------------------------------------------------------------------
+
+    std::string read_search_box(HWND dlg)
     {
-        const wchar_t* title = L"Search TuneIn";
-        const wchar_t* label = L"Station name:";
-        if (kind == tunein_kind::artist)
-            label = L"Artist name:";
-        else if (kind == tunein_kind::song)
-            label = L"Song title:";
+        wchar_t buf[512] = {};
+        GetDlgItemTextW(dlg, kIdTbSearch, buf, _countof(buf));
 
-        std::string text;
-        if (!prompt_text(dlg, title, label, text) || text.empty())
-            return;
-
-        push_level(dlg, state, "Search: " + text, tunein_search_url(kind, text), false);
+        try
+        {
+            return ti_trim(wide_to_utf8(buf));
+        }
+        catch (...)
+        {
+            return {};
+        }
     }
 
-    void recommend_prompt(HWND dlg, tunein_browser_state& state)
+    const wchar_t* search_hint(int mode)
     {
-        std::string text;
-        if (!prompt_text(dlg, L"Recommended stations",
-            L"Up to 10 artists, separated by commas:", text))
-            return;
-
-        std::vector<std::string> artists;
-        size_t start = 0;
-        while (start <= text.size())
+        switch (mode)
         {
-            size_t comma = text.find(',', start);
-            if (comma == std::string::npos)
-                comma = text.size();
+        case mode_artist:    return L"Artist name, then press Enter";
+        case mode_song:      return L"Song title, then press Enter";
+        case mode_recommend: return L"Up to 10 artists separated by commas, then press Enter";
+        default:             return L"Station name, then press Enter";
+        }
+    }
 
-            const std::string artist = ti_trim(text.substr(start, comma - start));
-            if (!artist.empty())
-                artists.push_back(artist);
+    void update_search_hint(HWND dlg)
+    {
+        const LRESULT mode = SendDlgItemMessageW(dlg, kIdTbMode, CB_GETCURSEL, 0, 0);
+        SendDlgItemMessageW(dlg, kIdTbSearch, EM_SETCUEBANNER, TRUE,
+            reinterpret_cast<LPARAM>(search_hint(mode == CB_ERR ? mode_station : static_cast<int>(mode))));
+    }
 
-            start = comma + 1;
+    // Selects the search type, then moves to the search box.
+    void focus_search(HWND dlg, int mode)
+    {
+        SendDlgItemMessageW(dlg, kIdTbMode, CB_SETCURSEL, static_cast<WPARAM>(mode), 0);
+        update_search_hint(dlg);
+        SetFocus(GetDlgItem(dlg, kIdTbSearch));
+        SendDlgItemMessageW(dlg, kIdTbSearch, EM_SETSEL, 0, -1);
+        set_status(dlg, "Type in the search box and press Enter.");
+    }
+
+    // Runs the search typed in the box, using the selected search type.
+    void run_search(HWND dlg, tunein_browser_state& state)
+    {
+        const std::string text = read_search_box(dlg);
+        if (text.empty())
+        {
+            set_status(dlg, "Type in the search box and press Enter.");
+            return;
         }
 
-        if (artists.empty())
-            return;
+        const LRESULT sel = SendDlgItemMessageW(dlg, kIdTbMode, CB_GETCURSEL, 0, 0);
+        const int mode = sel == CB_ERR ? mode_station : static_cast<int>(sel);
 
-        if (artists.size() > 10)
+        std::string title;
+        std::string url;
+
+        if (mode == mode_recommend)
         {
-            set_status(dlg, "You entered more than 10 artists.");
-            return;
+            std::vector<std::string> artists;
+            size_t start = 0;
+            while (start <= text.size())
+            {
+                size_t comma = text.find(',', start);
+                if (comma == std::string::npos)
+                    comma = text.size();
+
+                const std::string artist = ti_trim(text.substr(start, comma - start));
+                if (!artist.empty())
+                    artists.push_back(artist);
+
+                start = comma + 1;
+            }
+
+            if (artists.empty())
+                return;
+
+            if (artists.size() > 10)
+            {
+                set_status(dlg, "You entered more than 10 artists.");
+                return;
+            }
+
+            std::string query = "Recommend.ashx?partnerId=1";
+            for (size_t i = 0; i < artists.size(); ++i)
+                query += "&a[" + std::to_string(i) + "]=" + percent_encode(artists[i]);
+            query += "&render=json";
+
+            title = "Recommended stations";
+            url = tunein_url(query);
+        }
+        else
+        {
+            const tunein_kind kind = mode == mode_artist ? tunein_kind::artist
+                : mode == mode_song ? tunein_kind::song : tunein_kind::station;
+            title = "Search: " + text;
+            url = tunein_search_url(kind, text);
         }
 
-        std::string query = "Recommend.ashx?partnerId=1";
-        for (size_t i = 0; i < artists.size(); ++i)
-            query += "&a[" + std::to_string(i) + "]=" + percent_encode(artists[i]);
-        query += "&render=json";
-
-        push_level(dlg, state, "Recommended stations", tunein_url(query), false);
+        // A new search while a search result is showing replaces it, so Back
+        // still returns to the list the search was started from.
+        const bool wasSearch = state.stack.size() > 1 && state.stack.back().fromSearchBox;
+        if (push_level(dlg, state, title, url, false, true) && wasSearch)
+        {
+            state.stack.erase(state.stack.end() - 2);
+            refresh(dlg, state);
+        }
     }
 
     void run_action(HWND dlg, tunein_browser_state& state, int action)
@@ -446,18 +514,20 @@ namespace
                 set_status(dlg, "No username set.");
             break;
 
+        // The search entries move to the search box (with the matching type)
+        // instead of opening a popup.
         case act_search_station:
-            search_prompt(dlg, state, tunein_kind::station);
+            focus_search(dlg, mode_station);
             break;
         case act_search_artist:
-            search_prompt(dlg, state, tunein_kind::artist);
+            focus_search(dlg, mode_artist);
             break;
         case act_search_song:
-            search_prompt(dlg, state, tunein_kind::song);
+            focus_search(dlg, mode_song);
             break;
 
         case act_recommend:
-            recommend_prompt(dlg, state);
+            focus_search(dlg, mode_recommend);
             break;
 
         case act_station_recs:
@@ -586,6 +656,10 @@ namespace
 
             refresh(dlg, *state);
             set_status(dlg, "Open a category, or search. Select stations and press Import selected.");
+            for (const wchar_t* item : { L"Station", L"Artist", L"Song title", L"Recommend" })
+                SendDlgItemMessageW(dlg, kIdTbMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
+            SendDlgItemMessageW(dlg, kIdTbMode, CB_SETCURSEL, mode_station, 0);
+            update_search_hint(dlg);
             SetFocus(GetDlgItem(dlg, kIdTbList));
             return FALSE; // focus set manually
         }
@@ -597,6 +671,30 @@ namespace
 
             const int id = LOWORD(wp);
             const int code = HIWORD(wp);
+
+            if (id == kIdTbMode)
+            {
+                if (code == CBN_SELCHANGE)
+                    update_search_hint(dlg);
+                return TRUE;
+            }
+
+            if (id == kIdTbSearch)
+                return TRUE; // typing only; the search runs on Enter
+
+            {
+                const bool inSearch = GetFocus() == GetDlgItem(dlg, kIdTbSearch);
+                if (id == IDCANCEL && inSearch && !read_search_box(dlg).empty())
+                {
+                    SetDlgItemTextW(dlg, kIdTbSearch, L""); // Esc clears the box first
+                    return TRUE;
+                }
+                if (id == IDOK && inSearch)
+                {
+                    run_search(dlg, *state);
+                    return TRUE;
+                }
+            }
 
             if (id == IDCANCEL)
             {
@@ -664,16 +762,20 @@ namespace
             return;
         }
 
-        constexpr WORD kButton = 0x0080, kStatic = 0x0082, kListBox = 0x0083;
+        constexpr WORD kButton = 0x0080, kEdit = 0x0081, kStatic = 0x0082, kListBox = 0x0083, kComboBox = 0x0085;
 
         dialog_template t;
         t.begin(WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER,
             0, 0, 320, 232, L"Browse TuneIn", L"Segoe UI", 8);
 
         t.item(kStatic, SS_LEFT, 8, 6, 304, 10, kIdTbTitle, L"");
+        t.item(kComboBox, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
+            8, 20, 62, 60, kIdTbMode, L"");
+        t.item(kEdit, ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
+            74, 20, 238, 13, kIdTbSearch, L"");
         t.item(kListBox,
             LBS_EXTENDEDSEL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_BORDER | WS_TABSTOP,
-            8, 20, 304, 170, kIdTbList, L"");
+            8, 37, 304, 153, kIdTbList, L"");
         t.item(kStatic, SS_LEFT, 8, 194, 304, 10, kIdTbStatus, L"");
 
         t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 8, 212, 40, 14, kIdTbHome, L"Home");

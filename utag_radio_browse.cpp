@@ -21,6 +21,7 @@ namespace
     constexpr int kIdRbbHome = 1404;
     constexpr int kIdRbbBack = 1405;
     constexpr int kIdRbbImport = 1406;
+    constexpr int kIdRbbSearch = 1407; // inline search box (edit control)
 
     // Stations fetched per list.
     constexpr int kRbbListLimit = 200;
@@ -313,7 +314,8 @@ namespace
 
     // Loads `path` (modal progress window, abortable) and shows the stations
     // as a new level.
-    void push_stations(HWND dlg, browse_state& state, const std::string& title,
+    // Returns true when the new level was added.
+    bool push_stations(HWND dlg, browse_state& state, const std::string& title,
         const std::string& path)
     {
         service_ptr_t<radio_list_task> task = new service_impl_t<radio_list_task>(path);
@@ -326,18 +328,18 @@ namespace
             "Loading stations from Radio Browser...");
 
         if (!IsWindow(dlg))
-            return;
+            return false;
 
         if (!completed)
         {
             set_status(dlg, "Cancelled.");
-            return;
+            return false;
         }
 
         if (!task->error().empty())
         {
             set_status(dlg, "Could not load stations: " + task->error());
-            return;
+            return false;
         }
 
         browse_level level;
@@ -355,6 +357,54 @@ namespace
         state.stack.push_back(std::move(level));
         refresh(dlg, state);
         set_status(dlg, std::to_string(state.stack.back().entries.size()) + " entries.");
+        return true;
+    }
+
+    // ---- search box -------------------------------------------------------------------------
+
+    std::string read_search_box(HWND dlg)
+    {
+        wchar_t buf[512] = {};
+        GetDlgItemTextW(dlg, kIdRbbSearch, buf, _countof(buf));
+
+        std::string text;
+        try
+        {
+            text = wide_to_utf8(buf);
+        }
+        catch (...)
+        {
+            return {};
+        }
+
+        const char* ws = " \t\r\n";
+        const size_t first = text.find_first_not_of(ws);
+        if (first == std::string::npos)
+            return {};
+        return text.substr(first, text.find_last_not_of(ws) - first + 1);
+    }
+
+    // Searches Radio Browser for station names containing the text in the box.
+    // A new search while a search result is showing replaces it, so Back still
+    // returns to the list the search was started from.
+    void run_name_search(HWND dlg, browse_state& state)
+    {
+        const std::string value = read_search_box(dlg);
+        if (value.empty())
+        {
+            set_status(dlg, "Type a station name in the search box and press Enter.");
+            return;
+        }
+
+        const bool wasSearch = state.stack.size() > 1 &&
+            state.stack.back().title.rfind("Search: ", 0) == 0;
+
+        if (push_stations(dlg, state, "Search: " + value,
+            search_path("&name=" + percent_encode(value))) && wasSearch)
+        {
+            state.stack.erase(state.stack.end() - 2);
+            refresh(dlg, state);
+        }
     }
 
     // ---- commands ---------------------------------------------------------------------------
@@ -403,10 +453,10 @@ namespace
             break;
 
         case act_search_name:
-            if (prompt_text(dlg, L"Search Radio Browser", L"Station name contains:", value) &&
-                !value.empty())
-                push_stations(dlg, state, "Search: " + value,
-                    search_path("&name=" + percent_encode(value)));
+            // "Search by name..." moves to the search box instead of opening a popup.
+            SetFocus(GetDlgItem(dlg, kIdRbbSearch));
+            SendDlgItemMessageW(dlg, kIdRbbSearch, EM_SETSEL, 0, -1);
+            set_status(dlg, "Type a station name in the search box and press Enter.");
             break;
 
         default:
@@ -507,6 +557,8 @@ namespace
 
             refresh(dlg, *state);
             set_status(dlg, "Open a list or search. Select stations and press Import selected.");
+            SendDlgItemMessageW(dlg, kIdRbbSearch, EM_SETCUEBANNER, TRUE,
+                reinterpret_cast<LPARAM>(L"Search stations by name, then press Enter"));
             SetFocus(GetDlgItem(dlg, kIdRbbList));
             return FALSE; // focus set manually
         }
@@ -518,6 +570,23 @@ namespace
 
             const int id = LOWORD(wp);
             const int code = HIWORD(wp);
+
+            if (id == kIdRbbSearch)
+                return TRUE; // typing only; the search runs on Enter
+
+            {
+                const bool inSearch = GetFocus() == GetDlgItem(dlg, kIdRbbSearch);
+                if (id == IDCANCEL && inSearch && !read_search_box(dlg).empty())
+                {
+                    SetDlgItemTextW(dlg, kIdRbbSearch, L""); // Esc clears the box first
+                    return TRUE;
+                }
+                if (id == IDOK && inSearch)
+                {
+                    run_name_search(dlg, *state);
+                    return TRUE;
+                }
+            }
 
             if (id == IDCANCEL)
             {
@@ -585,16 +654,18 @@ namespace
             return;
         }
 
-        constexpr WORD kButton = 0x0080, kStatic = 0x0082, kListBox = 0x0083;
+        constexpr WORD kButton = 0x0080, kEdit = 0x0081, kStatic = 0x0082, kListBox = 0x0083;
 
         dialog_template t;
         t.begin(WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER,
             0, 0, 320, 232, L"Browse Radio Browser", L"Segoe UI", 8);
 
         t.item(kStatic, SS_LEFT, 8, 6, 304, 10, kIdRbbTitle, L"");
+        t.item(kEdit, ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
+            8, 20, 304, 13, kIdRbbSearch, L"");
         t.item(kListBox,
             LBS_EXTENDEDSEL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_BORDER | WS_TABSTOP,
-            8, 20, 304, 170, kIdRbbList, L"");
+            8, 37, 304, 153, kIdRbbList, L"");
         t.item(kStatic, SS_LEFT, 8, 194, 304, 10, kIdRbbStatus, L"");
 
         t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 8, 212, 40, 14, kIdRbbHome, L"Home");
