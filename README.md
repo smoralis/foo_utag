@@ -338,6 +338,12 @@ The source is split into several files, all of which belong to the component:
 
 Build it with a compatible Windows C++ toolchain and foobar2000 SDK setup. The source uses the component filename `foo_utag.dll`. Exact project-generation and build commands depend on your local SDK and build environment.
 
+## Other Links
+
+A python script to create foo_utag .utag files from the Radio Browser station directory.
+
+https://gist.github.com/smoralis/562aba0d5d9740310d5f0a6044d6d3f8
+
 ## License
 
 MIT License
