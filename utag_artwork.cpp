@@ -5,10 +5,14 @@
 #include <ole2.h>
 #include <shellapi.h>
 #include <commdlg.h>
+#include <commctrl.h>
+#include <uxtheme.h>
 
 #pragma comment(lib, "Windowscodecs.lib")
 #pragma comment(lib, "Msimg32.lib")
 #pragma comment(lib, "Comdlg32.lib")
+#pragma comment(lib, "Comctl32.lib")
+#pragma comment(lib, "UxTheme.lib")
 
 // -----------------------------------------------------------------------------
 // Manually assigned station logos.
@@ -292,10 +296,12 @@ namespace
 {
     constexpr int kIdHeader = 1001;
     constexpr int kIdPreview = 1002;
-    constexpr int kIdStatus = 1003;
     constexpr int kIdBrowse = 1004;
     constexpr int kIdFavicon = 1005;
+    constexpr int kIdStatus = 1003;  // placeholder in the template, replaced by the list
+    constexpr int kIdResults = 1008; // results list view
     constexpr int kIdRemove = 1006;
+    constexpr int kIdHomepage = 1007;
 
     constexpr UINT kMsgDrop = WM_APP + 1; // LPARAM: drop_payload* (heap)
     constexpr UINT kMsgDone = WM_APP + 2; // LPARAM: std::string* (heap), status text
@@ -598,14 +604,295 @@ namespace
     // Window logic
     // -------------------------------------------------------------------------
 
-    void set_status(HWND dlg, const std::string& text)
+    // Report format used between the worker, the handlers and log_result: lines
+    // separated by "\r\n"; a line is either "text" or "station<US>text" where
+    // <US> is the unit separator character (0x1F), which cannot occur in names.
+    constexpr char kSep = '\x1f';
+
+    std::string station_line(const std::string& station, const std::string& text)
     {
+        return station + kSep + text;
+    }
+
+    std::string join_lines(const std::string& report, const std::string& line)
+    {
+        return report.empty() ? line : report + "\r\n" + line;
+    }
+
+    // Adds the lines of `report` as rows of the results list and writes them to
+    // the foobar2000 console. Every message goes to the console, whatever the
+    // "Write messages to the console" option says.
+    void log_result(HWND dlg, const std::string& report)
+    {
+        const HWND list = GetDlgItem(dlg, kIdResults);
+
+        size_t start = 0;
+        while (start <= report.size())
+        {
+            size_t end = report.find("\r\n", start);
+            if (end == std::string::npos) end = report.size();
+
+            std::string station;
+            std::string text = report.substr(start, end - start);
+            const size_t sep = text.find(kSep);
+            if (sep != std::string::npos)
+            {
+                station = text.substr(0, sep);
+                text = text.substr(sep + 1);
+            }
+
+            if (!text.empty())
+            {
+                console::printf("[foo_utag] station logo: %s%s%s",
+                    station.c_str(), station.empty() ? "" : ": ", text.c_str());
+
+                if (list != nullptr)
+                {
+                    try
+                    {
+                        const std::wstring wideStation = utf8_to_wide(station);
+                        const std::wstring wideText = utf8_to_wide(text);
+
+                        // Keep the list bounded.
+                        while (ListView_GetItemCount(list) >= 500)
+                            ListView_DeleteItem(list, 0);
+
+                        LVITEMW item = {};
+                        item.mask = LVIF_TEXT;
+                        item.iItem = ListView_GetItemCount(list);
+                        item.pszText = const_cast<wchar_t*>(wideStation.c_str());
+                        const int index = static_cast<int>(
+                            SendMessageW(list, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
+                        if (index >= 0)
+                        {
+                            ListView_SetItemText(list, index, 1,
+                                const_cast<wchar_t*>(wideText.c_str()));
+                            ListView_EnsureVisible(list, index, FALSE);
+                        }
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+            }
+
+            if (end >= report.size()) break;
+            start = end + 2;
+        }
+    }
+
+    // True when foobar2000's dark mode hooks make the dialog dark: ask the
+    // dialog what text color it hands out for static controls.
+    bool dialog_is_dark(HWND dlg)
+    {
+        const HDC dc = GetDC(dlg);
+        if (dc == nullptr) return false;
+
+        SendMessageW(dlg, WM_CTLCOLORSTATIC, reinterpret_cast<WPARAM>(dc),
+            reinterpret_cast<LPARAM>(GetDlgItem(dlg, kIdHeader)));
+        const COLORREF text = GetTextColor(dc);
+        ReleaseDC(dlg, dc);
+
+        const int luminance = (GetRValue(text) * 299 + GetGValue(text) * 587 +
+            GetBValue(text) * 114) / 1000;
+        return luminance > 128;
+    }
+
+    // In dark mode the Windows header theme keeps drawing black column titles.
+    // The header sends NM_CUSTOMDRAW to its parent, the list view, so the list
+    // is subclassed and the header is painted here: dark background, light text.
+    LRESULT CALLBACK dark_header_subclass(HWND list, UINT msg, WPARAM wp, LPARAM lp,
+        UINT_PTR id, DWORD_PTR)
+    {
+        if (msg == WM_NOTIFY)
+        {
+            const NMHDR* hdr = reinterpret_cast<const NMHDR*>(lp);
+            const HWND header = ListView_GetHeader(list);
+            if (hdr != nullptr && header != nullptr &&
+                hdr->code == NM_CUSTOMDRAW && hdr->hwndFrom == header)
+            {
+                const NMCUSTOMDRAW* cd = reinterpret_cast<const NMCUSTOMDRAW*>(lp);
+
+                if (cd->dwDrawStage == CDDS_PREPAINT)
+                {
+                    // Also covers the empty area right of the last column.
+                    const HBRUSH background = CreateSolidBrush(RGB(45, 45, 45));
+                    FillRect(cd->hdc, &cd->rc, background);
+                    DeleteObject(background);
+                    return CDRF_NOTIFYITEMDRAW;
+                }
+
+                if (cd->dwDrawStage == CDDS_ITEMPREPAINT)
+                {
+                    RECT rc = cd->rc;
+
+                    const bool pressed = (cd->uItemState & CDIS_SELECTED) != 0;
+                    const HBRUSH background = CreateSolidBrush(
+                        pressed ? RGB(64, 64, 64) : RGB(45, 45, 45));
+                    FillRect(cd->hdc, &rc, background);
+                    DeleteObject(background);
+
+                    // Column divider on the right, line under the header.
+                    const HPEN pen = CreatePen(PS_SOLID, 1, RGB(80, 80, 80));
+                    const HGDIOBJ oldPen = SelectObject(cd->hdc, pen);
+                    MoveToEx(cd->hdc, rc.right - 1, rc.top + 2, nullptr);
+                    LineTo(cd->hdc, rc.right - 1, rc.bottom - 2);
+                    MoveToEx(cd->hdc, rc.left, rc.bottom - 1, nullptr);
+                    LineTo(cd->hdc, rc.right, rc.bottom - 1);
+                    SelectObject(cd->hdc, oldPen);
+                    DeleteObject(pen);
+
+                    wchar_t text[128] = {};
+                    HDITEMW item = {};
+                    item.mask = HDI_TEXT;
+                    item.pszText = text;
+                    item.cchTextMax = static_cast<int>(std::size(text));
+                    SendMessageW(header, HDM_GETITEMW, cd->dwItemSpec,
+                        reinterpret_cast<LPARAM>(&item));
+
+                    HFONT font = reinterpret_cast<HFONT>(SendMessageW(header, WM_GETFONT, 0, 0));
+                    if (font == nullptr)
+                        font = reinterpret_cast<HFONT>(SendMessageW(list, WM_GETFONT, 0, 0));
+                    const HGDIOBJ oldFont = font ? SelectObject(cd->hdc, font) : nullptr;
+
+                    SetBkMode(cd->hdc, TRANSPARENT);
+                    SetTextColor(cd->hdc, RGB(228, 228, 228));
+                    rc.left += 6;
+                    rc.right -= 6;
+                    DrawTextW(cd->hdc, text, -1, &rc,
+                        DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+                    if (oldFont) SelectObject(cd->hdc, oldFont);
+                    return CDRF_SKIPDEFAULT;
+                }
+
+                return CDRF_DODEFAULT;
+            }
+        }
+        else if (msg == WM_NCDESTROY)
+        {
+            RemoveWindowSubclass(list, dark_header_subclass, id);
+        }
+
+        return DefSubclassProc(list, msg, wp, lp);
+    }
+
+    // The list is deliberately NOT given to foobar2000's dark mode hooks
+    // (CCoreDarkModeHooks), which leave a SysListView32 unusable. It is themed
+    // here instead: dark scrollbars and header through the Windows dark mode
+    // visual styles, and explicit colors for the rows.
+    void apply_list_theme(HWND list, bool dark)
+    {
+        const HWND header = ListView_GetHeader(list);
+
+        if (dark)
+        {
+            SetWindowTheme(list, L"DarkMode_Explorer", nullptr);
+            if (header != nullptr)
+            {
+                SetWindowTheme(header, L"DarkMode_ItemsView", nullptr);
+                SetWindowSubclass(list, dark_header_subclass, 1, 0);
+            }
+
+            const COLORREF background = RGB(32, 32, 32);
+            ListView_SetBkColor(list, background);
+            ListView_SetTextBkColor(list, background);
+            ListView_SetTextColor(list, RGB(228, 228, 228));
+        }
+        else
+        {
+            SetWindowTheme(list, L"Explorer", nullptr);
+            if (header != nullptr)
+                SetWindowTheme(header, L"Explorer", nullptr);
+
+            ListView_SetBkColor(list, GetSysColor(COLOR_WINDOW));
+            ListView_SetTextBkColor(list, GetSysColor(COLOR_WINDOW));
+            ListView_SetTextColor(list, GetSysColor(COLOR_WINDOWTEXT));
+        }
+
+        InvalidateRect(list, nullptr, TRUE);
+        if (header != nullptr) InvalidateRect(header, nullptr, TRUE);
+    }
+
+    // Replaces the empty placeholder of the template by a report-style list
+    // with a Station and a Result column.
+    void create_results_list(HWND dlg)
+    {
+        const HWND placeholder = GetDlgItem(dlg, kIdStatus);
+        if (placeholder == nullptr) return;
+
+        RECT rc = {};
+        GetWindowRect(placeholder, &rc);
+        MapWindowPoints(nullptr, dlg, reinterpret_cast<POINT*>(&rc), 2);
+        DestroyWindow(placeholder);
+
+        INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LISTVIEW_CLASSES };
+        InitCommonControlsEx(&icc);
+
+        const HWND list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL |
+            LVS_SHOWSELALWAYS | LVS_NOSORTHEADER,
+            rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
+            dlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdResults)),
+            core_api::get_my_instance(), nullptr);
+        if (list == nullptr) return;
+
+        SendMessageW(list, WM_SETFONT, SendMessageW(dlg, WM_GETFONT, 0, 0), TRUE);
+        ListView_SetExtendedListViewStyle(list,
+            LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
+
+        const HDC dc = GetDC(dlg);
+        const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSX) : 96;
+        if (dc) ReleaseDC(dlg, dc);
+
+        LVCOLUMNW column = {};
+        column.mask = LVCF_TEXT | LVCF_WIDTH;
+        column.pszText = const_cast<wchar_t*>(L"Station");
+        column.cx = MulDiv(110, dpi, 96);
+        SendMessageW(list, LVM_INSERTCOLUMNW, 0, reinterpret_cast<LPARAM>(&column));
+
+        column.pszText = const_cast<wchar_t*>(L"Result");
+        column.cx = MulDiv(250, dpi, 96);
+        SendMessageW(list, LVM_INSERTCOLUMNW, 1, reinterpret_cast<LPARAM>(&column));
+        ListView_SetColumnWidth(list, 1, LVSCW_AUTOSIZE_USEHEADER);
+
+        apply_list_theme(list, dialog_is_dark(dlg));
+    }
+
+    // The station's "homepage" tag when it is an http(s) address. Only one
+    // station selected: with several there is no single page to open.
+    std::string station_homepage(const logo_state* state)
+    {
+        if (state->targets.size() != 1)
+            return {};
+
+        json station;
+        if (!read_station_json(state->targets[0].utagPath, station))
+            return {};
+
+        const std::string homepage = json_string_field(station, "homepage");
+        return is_http_url(homepage) ? homepage : std::string();
+    }
+
+    void open_homepage(HWND dlg, const logo_state* state)
+    {
+        const std::string homepage = station_homepage(state);
+        if (homepage.empty())
+        {
+            log_result(dlg, "This station has no homepage address.");
+            return;
+        }
+
         try
         {
-            SetDlgItemTextW(dlg, kIdStatus, utf8_to_wide(text).c_str());
+            const HINSTANCE result = ShellExecuteW(dlg, L"open",
+                utf8_to_wide(homepage).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            if (reinterpret_cast<INT_PTR>(result) <= 32)
+                log_result(dlg, "Could not open the homepage in your browser.");
         }
         catch (...)
         {
+            log_result(dlg, "The homepage address could not be used.");
         }
     }
 
@@ -642,6 +929,7 @@ namespace
 
         EnableWindow(GetDlgItem(dlg, kIdBrowse), !state->busy);
         EnableWindow(GetDlgItem(dlg, kIdFavicon), !state->busy && anyFavicon);
+        EnableWindow(GetDlgItem(dlg, kIdHomepage), !station_homepage(state).empty());
 
         bool anyLogo = false;
         for (const auto& target : state->targets)
@@ -739,23 +1027,16 @@ namespace
     // Copies one local image file in as the logo of every target.
     void apply_file(HWND dlg, logo_state* state, const std::wstring& file)
     {
-        unsigned ok = 0;
-        std::string problems;
+        std::string report;
         for (const auto& target : state->targets)
         {
             std::string error;
-            if (set_station_logo_from_file(target.utagPath, file, error))
-                ++ok;
-            else
-                problems += "\r\n" + target.label + ": " + error;
+            const bool ok = set_station_logo_from_file(target.utagPath, file, error);
+            report = join_lines(report,
+                station_line(target.label, ok ? std::string("Logo set") : error));
         }
 
-        std::string status;
-        if (ok > 0)
-            status = ok == 1 ? "Logo set." : "Logo set for " + std::to_string(ok) + " stations.";
-        else
-            status = "Could not set the logo.";
-        set_status(dlg, status + problems);
+        log_result(dlg, report);
         refresh_preview(dlg, state);
     }
 
@@ -767,7 +1048,7 @@ namespace
     {
         state->busy = true;
         refresh_buttons(dlg, state);
-        set_status(dlg, "Downloading...");
+        log_result(dlg, "Downloading...");
 
         std::vector<logo_target> targets = state->targets;
         std::thread([dlg, targets = std::move(targets), url]() {
@@ -775,9 +1056,6 @@ namespace
             std::string report;
             try
             {
-                unsigned ok = 0;
-                std::string problems;
-
                 std::wstring shared;
                 std::string sharedError;
                 bool sharedOk = false;
@@ -811,21 +1089,17 @@ namespace
                         }
                     }
 
-                    if (have && set_station_logo_from_file(target.utagPath, temp, error))
-                        ++ok;
-                    else if (!error.empty())
-                        problems += "\r\n" + target.label + ": " + error;
+                    const bool done = have &&
+                        set_station_logo_from_file(target.utagPath, temp, error);
+                    report = join_lines(report, station_line(target.label,
+                        done ? std::string("Logo set")
+                        : (error.empty() ? std::string("Could not set the logo") : error)));
 
                     if (ownsTemp) DeleteFileW(temp.c_str());
                 }
 
                 if (!shared.empty()) DeleteFileW(shared.c_str());
 
-                if (ok > 0)
-                    report = ok == 1 ? "Logo set." : "Logo set for " + std::to_string(ok) + " stations.";
-                else
-                    report = "Could not set the logo.";
-                report += problems;
             }
             catch (...)
             {
@@ -843,7 +1117,7 @@ namespace
     {
         if (state->busy)
         {
-            set_status(dlg, "Please wait for the current download to finish.");
+            log_result(dlg, "Please wait for the current download to finish.");
             return;
         }
 
@@ -858,7 +1132,7 @@ namespace
 
         if (!payload.files.empty())
         {
-            set_status(dlg, "That is not a supported image (PNG, JPEG, GIF, BMP, WebP or SVG).");
+            log_result(dlg, "That is not a supported image (PNG, JPEG, GIF, BMP, WebP or SVG).");
             return;
         }
 
@@ -870,7 +1144,7 @@ namespace
             }
             catch (...)
             {
-                set_status(dlg, "That address could not be used.");
+                log_result(dlg, "That address could not be used.");
             }
         }
     }
@@ -896,21 +1170,20 @@ namespace
 
     void remove_logos(HWND dlg, logo_state* state)
     {
-        unsigned removed = 0;
-        std::string problems;
+        std::string report;
         for (const auto& target : state->targets)
         {
             if (find_station_artwork(target.utagPath).empty())
                 continue;
             std::string error;
-            if (remove_station_logo(target.utagPath, error))
-                ++removed;
-            else
-                problems += "\r\n" + target.label + ": " + error;
+            const bool ok = remove_station_logo(target.utagPath, error);
+            report = join_lines(report,
+                station_line(target.label, ok ? std::string("Logo removed") : error));
         }
 
-        set_status(dlg, (removed == 1 ? std::string("Logo removed.")
-            : "Removed " + std::to_string(removed) + " logos.") + problems);
+        if (report.empty())
+            report = "No selected station has a logo.";
+        log_result(dlg, report);
         refresh_preview(dlg, state);
     }
 
@@ -924,8 +1197,11 @@ namespace
         {
             state = reinterpret_cast<logo_state*>(lp);
             SetWindowLongPtrW(dlg, DWLP_USER, lp);
+            // Hook the dialog and its controls first; the results list is created
+            // afterwards so the hooks never touch it (see apply_list_theme).
             state->darkHooks.AddDialogWithControls(dlg);
             modeless_dialog_manager::g_add(dlg); // Tab / Enter / Esc keys
+            create_results_list(dlg);
 
             refresh_header(dlg, state);
             refresh_preview(dlg, state);
@@ -944,7 +1220,7 @@ namespace
             // children have no drop target of their own, so Windows hands the
             // drop to the dialog.
             if (state->dropTarget == nullptr)
-                set_status(dlg, "Drag and drop is not available; use Browse...");
+                log_result(dlg, "Drag and drop is not available; use Browse...");
 
             return TRUE;
         }
@@ -974,7 +1250,7 @@ namespace
             if (state != nullptr)
             {
                 state->busy = false;
-                if (text) set_status(dlg, *text);
+                if (text) log_result(dlg, *text);
                 refresh_preview(dlg, state);
             }
             return TRUE;
@@ -993,6 +1269,9 @@ namespace
                 return TRUE;
             case kIdRemove:
                 if (!state->busy) remove_logos(dlg, state);
+                return TRUE;
+            case kIdHomepage:
+                open_homepage(dlg, state);
                 return TRUE;
             case IDCANCEL:
                 DestroyWindow(dlg);
@@ -1053,14 +1332,15 @@ void utag_open_logo_dialog(HWND owner, const std::vector<std::string>& utagPaths
 
     dialog_template t;
     t.begin(WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER,
-        0, 0, 240, 176, L"Station logo", L"Segoe UI", 9);
+        0, 0, 240, 236, L"Station logo", L"Segoe UI", 9);
     t.item(kStatic, SS_LEFT | SS_ENDELLIPSIS, 8, 8, 224, 10, kIdHeader, L"");
     t.item(kStatic, SS_OWNERDRAW, 8, 22, 224, 100, kIdPreview, L"");
-    t.item(kStatic, SS_LEFT, 8, 128, 224, 22, kIdStatus, L"");
-    t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 8, 154, 54, 14, kIdBrowse, L"Browse...");
-    t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 66, 154, 62, 14, kIdFavicon, L"Get favicon");
-    t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 132, 154, 46, 14, kIdRemove, L"Remove");
-    t.item(kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 182, 154, 50, 14, IDCANCEL, L"Close");
+    t.item(kStatic, SS_LEFT, 8, 128, 224, 66, kIdStatus, L"");
+    t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 8, 198, 54, 14, kIdBrowse, L"Browse...");
+    t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 66, 198, 62, 14, kIdFavicon, L"Get favicon");
+    t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 132, 198, 46, 14, kIdRemove, L"Remove");
+    t.item(kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 182, 198, 50, 14, IDCANCEL, L"Close");
+    t.item(kButton, BS_PUSHBUTTON | WS_TABSTOP, 8, 216, 90, 14, kIdHomepage, L"Open homepage");
 
     const HWND dlg = CreateDialogIndirectParamW(
         core_api::get_my_instance(), t.data(), owner,

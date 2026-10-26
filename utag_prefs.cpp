@@ -135,7 +135,7 @@ namespace
                 74, 243, 198, 11, kPrefPlTunein, L"");
 
             t.item(kStatic, SS_LEFT,
-                8, 259, 62, 11, 0xFFFF, L"Icecast:");
+                8, 259, 62, 15, 0xFFFF, L"Icecast:");
 
             t.item(kEdit,
                 ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,

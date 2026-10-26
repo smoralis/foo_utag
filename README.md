@@ -265,6 +265,7 @@ A station's artwork is a **sidecar image** beside its `.utag` file: same folder,
 - **Drop an image URL or an image dragged from a web page**; it is downloaded in the background (http and https).
 - **Browse...** to pick a file.
 - **Get favicon** downloads each station's own `favicon` URL right now, whatever the preference says.
+- **Open homepage** opens the station's `homepage` tag in your browser (http and https addresses only; enabled when exactly one station is selected and it has one). Handy for finding a logo to drop back into the window.																																																						   
 - **Remove** deletes the logo image (also available as **Remove station logo** in the context menu, which asks first).
 
 With several stations selected, a dropped image is used for all of them. The file is checked by its contents (not its name), copied beside the `.utag` under the station's base name with the correct extension, and replaces any older sidecar of that station. Images up to 32 MB are accepted. The preview needs Windows to be able to decode the format; SVG, and WebP on systems without the WebP extension, are saved and used as artwork but show no preview.
