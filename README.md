@@ -155,6 +155,35 @@ TuneIn is read through its unofficial OPML web service, which may change or stop
 - **File → Utag Input → Import stations from Icecast...** asks for search terms (matched against station name, genre, codec, description and current song) and a maximum number of stations (1 to 5000, default 100), then imports the matches into a new sub folder of the default folder. The files go into a new playlist named like that folder.
 - **File → Utag Input → Browse Icecast Directory...** loads the directory once per session and keeps it in memory. Type in the search box at the top to filter the list live; **Enter** moves to the list and **Esc** clears the box. **Refresh** downloads the directory again and keeps the text in the box. Select one or more stations and press **Import selected** (or double-click one). The created files are appended to the `Icecast` playlist (see **Preferences**), which becomes the active playlist with the first appended item focused.
 
+## Tags written by each provider
+
+A tag is written only when the provider supplies a non-empty value.
+
+| Tag | Radio Browser | Icecast Directory | TuneIn | TuneIn with details option |
+|---|---|---|---|---|
+| `@` (stream URL) | ✓ | ✓ | ✓ | ✓ |
+| `name` | ✓ | ✓ | ✓ | ✓ |
+| `title` (same as `name`) | ✓ | ✓ | ✓ | ✓ |
+| `genre` | ✓ (from its comma-separated tags, multi-value) | ✓ (from its genre field) | – | ✓ |
+| `country` | ✓ | – | – | – |
+| `countrycode` | ✓ | – | – | – |
+| `countryflag` (added from `countrycode`) | ✓ | – | – | – |
+| `language` | ✓ | – | – | – |
+| `codec` | ✓ | ✓ | ✓ | ✓ |
+| `bitrate` | ✓ | ✓ | ✓ | ✓ |
+| `homepage` | ✓ | ✓ | – | – |
+| `favicon` (logo URL) | ✓ | – | ✓ | ✓ |
+| `stationuuid` | ✓ | – | – | – |
+| `stream_tunein_id` | – | – | ✓ | ✓ |
+| `location` | – | – | – | ✓ |
+| `description` | – | – | – | ✓ |
+| `tunein_url` | – | – | – | ✓ |
+| `country_region_id` | – | – | – | ✓ |
+
+- **Icecast Directory:** the directory also has a description and a current song for each station. They are used by the search filter but are not written to the file. The Icecast import uses the same writer as Radio Browser, which is why the tag names match.
+- **TuneIn:** TuneIn gives no country code, so its files never get a `countryflag`. The last column needs **Look up station details when importing from TuneIn** in the preferences (off by default).
+- **Radio Browser column:** it also describes **Search Radio Browser and tag**, **Add internet radio url and create utag** with the Radio Browser lookup ticked, and **Create utag files** from a playlist when the lookup finds the station.
+- **Without a lookup:** **Add internet radio url and create utag** writes only `@`, `name` and `title`, and **Create utag files** uses the playlist track's own tags.
 ## Creating `.utag` files from a playlist
 
 1. Select one or more playlist tracks.
