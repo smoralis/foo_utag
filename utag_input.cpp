@@ -138,7 +138,9 @@ public:
             throw exception_io_data();
         }
 
-        m_url = urlIt->get<std::string>();
+        // A relative local path is resolved against this .utag's folder for
+        // playback only; the stored "@" text stays as written (retag keeps it).
+        m_url = resolve_utag_reference(urlIt->get<std::string>(), m_path);
 
         // A stub that points at another .utag would recurse forever.
         if (reference_is_utag(m_url))

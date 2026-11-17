@@ -43,6 +43,7 @@ extern const GUID g_utag_guid;
 extern cfg_bool g_cfg_handoff;
 extern cfg_bool g_cfg_favicon;
 extern cfg_bool g_cfg_logo_fileops;
+extern cfg_bool g_cfg_relative_refs;
 extern cfg_bool g_cfg_logging;
 extern cfg_bool g_cfg_result_popups;
 extern cfg_bool g_cfg_tunein_details;
@@ -57,6 +58,7 @@ extern cfg_string g_cfg_playlist_icecast;
 bool handoff_enabled();
 bool favicon_download_enabled();
 bool logo_fileops_enabled();
+bool relative_refs_enabled();
 bool utag_console_logging_enabled();
 
 // Convenience logging macro used throughout this file. Replace existing
@@ -86,6 +88,10 @@ void add_country_flag(json& station, bool overwrite = false);
 double json_duration_to_seconds(const json& value);
 bool is_local_file_reference(const std::string& url);
 bool reference_is_utag(const std::string& ref);
+// Relative "@" references: resolved against the folder of the .utag file.
+bool is_relative_local_reference(const std::string& ref);
+std::string resolve_utag_reference(const std::string& at, const std::string& utagPath);
+std::string make_relative_reference(const std::string& reference, const std::string& utagFolderNative);
 bool is_utag_path(const std::string& path);
 std::wstring make_safe_filename_base(const std::string& label);
 std::string percent_encode(const std::string& text);

@@ -108,7 +108,7 @@ The results popup lists the first 60 stations in detail (stream URL `@` and outp
    - **Most clicked**, **Most voted**, **Trending now** (recently clicked) and **Recently added or changed**
    - **Tag...**, **Country...**, **Language...** and **Codec...**: each opens a list with a filter box, then shows the stations that match
    - **Search by name...**: moves to the search box at the top of the window (you can also click the box directly). Type part of a station name and press **Enter**; **Esc** clears the box. A new search while search results are showing replaces them, so **Back** still returns to the list you started from.
-3. Each station list shows up to 200 working stations, with codec, bitrate and country code. Lists are always sorted ascending by name, including the top lists.
+3. Each station list shows all matching working stations (up to the list box ceiling of 32767), with codec, bitrate and country code. Lists are always sorted ascending by name, including the top lists.
 4. Select one or more stations and press **Import selected**, or double-click a station to import just that one. **Back** and **Home** move between lists.
 
 Imports create a new sub folder of the default folder named after the list and the date and time, with the same station fields as the search import above. The created files are appended to the `RadioBrowser` playlist (see **Preferences**), which becomes the active playlist with the first appended item focused.
@@ -117,7 +117,7 @@ Imports create a new sub folder of the default folder named after the list and t
 
 1. Choose **File → Utag Input → Import stations from TuneIn...**.
 2. Enter what to search for and choose **Station name**, **Artist** or **Song title**.
-3. Set **Max stations** (1 to 200, default 25) and press **Import**. If no default folder is saved yet, you are asked to choose one first.
+3. Set **Max stations** (1 to 5000, default 25) and press **Import**. If no default folder is saved yet, you are asked to choose one first.
 
 Each station needs a further request to find its stream: a direct URL is used if TuneIn gives one, otherwise the first stream in the station's `.pls` or `.m3u` playlist. Anything after a `?` is removed from the stream URL. Stations whose stream cannot be found are skipped and listed in the results.
 
@@ -238,21 +238,32 @@ When tags are saved, standard tag fields handled by the component are replaced u
 
 ## Preferences
 
-All options are on one page: **Preferences → Tools → Utag Input**.
+The options are on two tabs of **Preferences → Tools → Utag Input**: **General** and **Messages and files**.
+
+### General tab
 
 - **Playback**
   - **Reuse the running stream when the playing item is retagged**: enabled by default
   - **Download the favicon image during playback**: disabled by default
-- **Default folder**: used by **Create utag files in default folder**, by **Add internet radio url and create utag** and by the importers. If empty, you are asked when a folder is needed.
-- **Messages**
-  - **Write messages to the foobar2000 console**: enabled by default
-  - **Show a results window after import and create commands**: enabled by default. Errors are always shown. When it is off, a short summary is written to the console instead, and the full per-station details too if console messages are on.
+- **Default folder**: used by **Create utag files in default folder**, by **Add internet radio url and create utag** and by the importers. If empty, you are asked when a folder is needed. The box also accepts a path that is not absolute:
+    - `..\Music\utags` or `Music\utags` is relative to the foobar2000 folder (the folder that contains `foobar2000.exe`).
+    - `\Music\utags` (a single leading backslash) is on the drive foobar2000 runs from.
+
+    Both follow the drive when its letter changes, which suits a portable install on an external drive. When **Browse...** picks a folder on the same drive as foobar2000, you are asked whether to store it in the relative form. **Set default utag folder...** in the Tagging menu always stores the absolute path; type the relative form in the preferences box if you want it.
 - **Radio Browser and TuneIn**
   - **Look each URL up in Radio Browser when creating utag files from playlist tracks**: enabled by default
   - **Look up station details when importing from TuneIn**: disabled by default. See below.
 - **Playlists for the browse windows**: the playlist names used by the Radio Browser, TuneIn and Icecast browse windows (defaults `RadioBrowser`, `Tunein`, `Icecast`). Leave a box empty to use its default name. The playlist is created if it does not exist, and new stations are appended to it.
+- **Station logos**: **Move, copy and delete the logo image together with its .utag file...** (enabled by default, see the logo section).
 
-The page scrolls when the preferences window is too short to show everything, and it stretches to the available width.
+### Messages and files tab
+
+- **Messages**
+  - **Write messages to the foobar2000 console**: enabled by default
+  - **Show a results window after import and create commands**: enabled by default. Errors are always shown. When it is off, a short summary is written to the console instead, and the full per-station details too if console messages are on.
+- **Local files**
+  - **Write local file references as paths relative to the .utag file when creating utag files**: disabled by default. See *Relative file references*.
+
 
 ## Stream handoff preference
 
@@ -320,7 +331,7 @@ The built-in Album Art Viewer may cache artwork and might need a track change or
 - The component does not connect to a stream during a library metadata scan.
 - The source limits `.utag` files to 4 MiB.
 - The playlist creation commands skip selected entries whose paths already end in `.utag`.
-- Radio Browser import needs an internet connection and uses the SDK's `http_client`; it fetches at most 5000 stations per run. The Radio Browser lists fetch at most 200 stations.
+- Radio Browser import needs an internet connection and uses the SDK's `http_client`; it fetches at most 5000 stations per run. The Radio Browser lists are not capped by the component; a list shows at most 32767 stations, the most a Windows list box can hold.
 - The Radio Browser lookup by URL uses the `/json/stations/byurl` endpoint, trying the same mirrors as the import.
 - The browse windows add their files with an asynchronous location lookup, so the playlist focus is set once foobar2000 has resolved the new `.utag` files.
 - TuneIn import and browsing use TuneIn's OPML web service (`opml.radiotime.com`, over http). It is unofficial and undocumented, so it may change or stop working.
@@ -343,6 +354,27 @@ The component supports **local file references**, allowing a `.utag` file to ref
 ```
 
 The `@` field identifies the referenced audio file. The component uses this reference to access the original audio and retrieve its media information.
+
+### Relative file references
+
+`@` can also be a path **relative to the folder of the `.utag` file**, so a library on an external drive keeps working when the drive letter changes or when you move the whole tree somewhere else:
+
+```json
+[
+  {
+    "@": "..\\Audio\\Artist\\Example.m4a",
+    "TITLE": "Example Track"
+  }
+]
+```
+
+- `..\Audio\Example.m4a` and `Audio/Example.m4a` are resolved against the folder that contains the `.utag` file. Both `\` and `/` work, and `..` goes up a folder.
+- `\Audio\Example.m4a` (starting with a single backslash) is resolved from the root of the drive (or share) the `.utag` file is on, so it survives a drive letter change as long as the folder layout on that drive stays the same.
+- Playback, the file's technical info and artwork all use the resolved path. The text in `@` is never rewritten: Properties edits and tag saves keep it exactly as you wrote it.
+- Absolute references (`file://C:\...`, `C:\...`, `\\server\share\...`) and stream URLs work as before.
+- **Preferences → Tools → Utag Input → Local files:** **Write local file references as paths relative to the .utag file when creating utag files** makes **Create utag files...** and **Create utag files in default folder** store local tracks as relative paths. It is off by default. The audio file must be on the same drive (or share) as the `.utag` folder; otherwise the absolute path is written.
+- Existing `.utag` files are not converted; edit `@` by hand if you want to change them.
+- Relative paths are relative to the `.utag` file, so moving a `.utag` file to a different folder (on its own, without the audio it points to) breaks the reference. Moving the `.utag` files and the audio together, in the same relative layout, keeps it working. foo_utag does not rewrite `@` when files are moved.
 
 ### Non-destructive metadata storage
 

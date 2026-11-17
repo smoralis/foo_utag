@@ -293,6 +293,8 @@ private:
 
         const std::wstring safeName = make_safe_filename_base(item.filenameLabel);
         station["@"] = item.url;
+        if (relative_refs_enabled())
+            station["@"] = make_relative_reference(item.url, wide_to_utf8(m_folder));
         add_country_flag(station);
         const std::string contents = json::array({ station }).dump(4, ' ', false,
             json::error_handler_t::replace) + "\n";

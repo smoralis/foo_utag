@@ -103,6 +103,79 @@ static bool is_existing_directory(const std::wstring& path)
         (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
+// Folder of foobar2000.exe, without a trailing backslash.
+std::wstring foobar_install_dir()
+{
+    std::wstring buf(MAX_PATH, L'\0');
+    for (;;)
+    {
+        const DWORD n = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+        if (n == 0)
+            return {};
+        if (n < buf.size())
+        {
+            buf.resize(n);
+            break;
+        }
+        if (buf.size() >= 32768)
+            return {};
+        buf.resize(buf.size() * 2);
+    }
+
+    const size_t slash = buf.find_last_of(L'\\');
+    return slash == std::wstring::npos ? std::wstring() : buf.substr(0, slash);
+}
+
+std::wstring resolve_folder_setting(const std::wstring& text)
+{
+    if (text.empty())
+        return text;
+
+    // Absolute: "C:\x", "C:x", UNC and device paths ("\\server\share", "\\?\C:\x").
+    if (text.size() >= 2 && text[1] == L':')
+        return text;
+    if (text.size() >= 2 &&
+        (text[0] == L'\\' || text[0] == L'/') &&
+        (text[1] == L'\\' || text[1] == L'/'))
+        return text;
+
+    const std::wstring base = foobar_install_dir();
+    if (base.empty())
+        return text;
+
+    std::wstring rel = text;
+    std::replace(rel.begin(), rel.end(), L'/', L'\\');
+
+    std::wstring joined;
+    if (rel[0] == L'\\')
+    {
+        // Rooted on the drive (or share) foobar2000 runs from.
+        std::wstring root((std::max<size_t>)(MAX_PATH, base.size() + 2), L'\0');
+        if (!GetVolumePathNameW((base + L"\\").c_str(), root.data(), static_cast<DWORD>(root.size())))
+            return text;
+        root.resize(wcslen(root.c_str()));
+        while (!root.empty() && root.back() == L'\\')
+            root.pop_back();
+        joined = root + rel;
+    }
+    else
+    {
+        joined = base + L"\\" + rel;
+    }
+
+    const DWORD needed = GetFullPathNameW(joined.c_str(), 0, nullptr, nullptr);
+    if (needed == 0)
+        return text;
+
+    std::wstring full(static_cast<size_t>(needed), L'\0');
+    const DWORD written = GetFullPathNameW(joined.c_str(), needed, full.data(), nullptr);
+    if (written == 0 || written >= needed)
+        return text;
+
+    full.resize(written);
+    return full;
+}
+
 // Returns the saved default folder, asking the user to choose one when none
 // is saved yet (or the saved one no longer exists). `forcePick` always asks.
 bool get_default_folder(std::wstring& folder, bool forcePick)
@@ -112,7 +185,8 @@ bool get_default_folder(std::wstring& folder, bool forcePick)
     try
     {
         if (g_cfg_default_dir.length() > 0)
-            saved = utf8_to_wide(g_cfg_default_dir.get_ptr());
+            saved = resolve_folder_setting(
+                trim_wide(utf8_to_wide(g_cfg_default_dir.get_ptr())));
     }
     catch (...)
     {

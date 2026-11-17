@@ -101,7 +101,8 @@ public:
             refIt->get<std::string>().empty())
             throw exception_album_art_not_found();
 
-        const std::string reference = to_native_windows_path(refIt->get<std::string>());
+        const std::string reference = to_native_windows_path(
+            resolve_utag_reference(refIt->get<std::string>(), path));
         // Sidecar image beside the .utag (manual logo or downloaded favicon).
         // No "favicon" key is needed for a manually assigned logo.
         std::string imagePath;
@@ -207,7 +208,8 @@ public:
         // Resolve the referenced audio file.
         const std::string reference =
             to_native_windows_path(
-                it->get_ref<const std::string&>());
+                resolve_utag_reference(
+                    it->get_ref<const std::string&>(), path));
 
         abort.check();
 

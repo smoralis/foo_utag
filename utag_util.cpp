@@ -319,6 +319,182 @@ bool is_local_file_reference(const std::string& url)
     return false;
 }
 
+// -----------------------------------------------------------------------------
+// Relative local file references
+// -----------------------------------------------------------------------------
+//
+// "@" may be a path relative to the folder of the .utag file ("..\Music\a.flac",
+// "Audio/a.flac"), or rooted on the .utag file's own drive ("\Music\a.flac"), so a
+// library on an external drive keeps working when the drive letter changes.
+
+bool is_relative_local_reference(const std::string& ref)
+{
+    if (ref.empty())
+        return false;
+
+    // Any URL scheme ("http://", "file://", "file-relative://", ...).
+    const size_t scheme = ref.find("://");
+    if (scheme != std::string::npos &&
+        ref.find_first_of("\\/") > scheme)
+        return false;
+
+    // Drive paths ("C:\x", "C:x").
+    if (ref.size() >= 2 && ref[1] == ':' &&
+        ((ref[0] >= 'A' && ref[0] <= 'Z') || (ref[0] >= 'a' && ref[0] <= 'z')))
+        return false;
+
+    // UNC and device paths ("\\server\share", "\\?\C:\x").
+    if (ref.size() >= 2 &&
+        (ref[0] == '\\' || ref[0] == '/') &&
+        (ref[1] == '\\' || ref[1] == '/'))
+        return false;
+
+    return true;
+}
+
+std::string resolve_utag_reference(const std::string& at, const std::string& utagPath)
+{
+    if (!is_relative_local_reference(at))
+        return at;
+
+    try
+    {
+        // Only a .utag that lives on a local file system can anchor a relative path.
+        if (utagPath.find("://") != std::string::npos &&
+            utagPath.compare(0, 7, "file://") != 0)
+            return at;
+
+        const std::wstring utag = utf8_to_wide(to_native_windows_path(utagPath));
+        std::wstring rel = utf8_to_wide(at);
+        std::replace(rel.begin(), rel.end(), L'/', L'\\');
+
+        const size_t slash = utag.find_last_of(L'\\');
+        if (slash == std::wstring::npos)
+            return at;
+
+        const std::wstring dir = utag.substr(0, slash + 1);
+        std::wstring joined;
+
+        if (rel[0] == L'\\')
+        {
+            // Rooted on the drive (or share) the .utag file is on.
+            std::wstring root((std::max<size_t>)(MAX_PATH, dir.size() + 2), L'\0');
+            if (!GetVolumePathNameW(dir.c_str(), root.data(), static_cast<DWORD>(root.size())))
+                return at;
+            root.resize(wcslen(root.c_str()));
+            while (!root.empty() && root.back() == L'\\')
+                root.pop_back();
+            joined = root + rel;
+        }
+        else
+        {
+            joined = dir + rel;
+        }
+
+        const DWORD needed = GetFullPathNameW(joined.c_str(), 0, nullptr, nullptr);
+        if (needed == 0)
+            return at;
+
+        std::wstring full(static_cast<size_t>(needed), L'\0');
+        const DWORD written = GetFullPathNameW(joined.c_str(), needed, full.data(), nullptr);
+        if (written == 0 || written >= needed)
+            return at;
+        full.resize(written);
+
+        return "file://" + wide_to_utf8(full);
+    }
+    catch (...)
+    {
+        return at;
+    }
+}
+
+namespace
+{
+    std::vector<std::wstring> split_path_components(const std::wstring& path, std::wstring& root)
+    {
+        // root: "C:" or "\\server\share"; components follow.
+        size_t pos = 0;
+        root.clear();
+
+        if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\')
+        {
+            size_t p = path.find(L'\\', 2);
+            if (p == std::wstring::npos) return {};
+            p = path.find(L'\\', p + 1);
+            root = path.substr(0, p == std::wstring::npos ? path.size() : p);
+            pos = root.size();
+        }
+        else if (path.size() >= 2 && path[1] == L':')
+        {
+            root = path.substr(0, 2);
+            pos = 2;
+        }
+        else
+        {
+            return {};
+        }
+
+        std::vector<std::wstring> parts;
+        while (pos < path.size())
+        {
+            while (pos < path.size() && (path[pos] == L'\\' || path[pos] == L'/')) ++pos;
+            const size_t next = path.find_first_of(L"\\/", pos);
+            const size_t end = next == std::wstring::npos ? path.size() : next;
+            if (end > pos) parts.push_back(path.substr(pos, end - pos));
+            pos = end;
+        }
+        return parts;
+    }
+
+    bool wide_equal_nocase(const std::wstring& a, const std::wstring& b)
+    {
+        return a.size() == b.size() &&
+            CompareStringOrdinal(a.c_str(), static_cast<int>(a.size()),
+                b.c_str(), static_cast<int>(b.size()), TRUE) == CSTR_EQUAL;
+    }
+}
+
+std::string make_relative_reference(const std::string& reference, const std::string& utagFolderNative)
+{
+    // Only absolute local paths on the same drive/share as the .utag folder can be
+    // made relative; anything else is returned unchanged.
+    if (!is_local_file_reference(reference))
+        return reference;
+
+    try
+    {
+        std::wstring refRoot, dirRoot;
+        const std::vector<std::wstring> ref =
+            split_path_components(utf8_to_wide(to_native_windows_path(reference)), refRoot);
+        const std::vector<std::wstring> dir =
+            split_path_components(utf8_to_wide(utagFolderNative), dirRoot);
+
+        if (ref.empty() || refRoot.empty() || !wide_equal_nocase(refRoot, dirRoot))
+            return reference;
+
+        size_t common = 0;
+        while (common < dir.size() && common + 1 < ref.size() &&
+            wide_equal_nocase(dir[common], ref[common]))
+            ++common;
+
+        std::wstring result;
+        for (size_t i = common; i < dir.size(); ++i)
+            result += L"..\\";
+        for (size_t i = common; i < ref.size(); ++i)
+        {
+            if (i > common) result += L'\\';
+            result += ref[i];
+        }
+
+        return result.empty() ? reference : wide_to_utf8(result);
+    }
+    catch (...)
+    {
+        return reference;
+    }
+}
+
 // True when a reference points at another .utag stub. Such a reference would
 // make the input (or the artwork extractor/editor) open itself recursively.
 bool reference_is_utag(const std::string& ref)

@@ -119,3 +119,16 @@ bool logo_fileops_enabled()
 {
     return g_cfg_logo_fileops;
 }
+
+// Write local file references as paths relative to the .utag file when creating
+// .utag files from playlist tracks (same drive only). Off by default.
+// {5E1B7C42-9D3A-4F68-A0B1-7C2D8E94F613}
+static const GUID g_guid_cfg_relative_refs =
+{ 0x5e1b7c42, 0x9d3a, 0x4f68, { 0xa0, 0xb1, 0x7c, 0x2d, 0x8e, 0x94, 0xf6, 0x13 } };
+
+cfg_bool g_cfg_relative_refs(g_guid_cfg_relative_refs, false);
+
+bool relative_refs_enabled()
+{
+    return g_cfg_relative_refs;
+}

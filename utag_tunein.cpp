@@ -74,10 +74,10 @@ namespace
                 {
                     wchar_t* end = nullptr;
                     limit = std::wcstol(limitText.c_str(), &end, 10);
-                    if (end == nullptr || *end != L'\0' || limit < 1 || limit > 200)
+                    if (end == nullptr || *end != L'\0' || limit < 1 || limit > 5000)
                     {
                         SetDlgItemTextW(dlg, kIdTiStatus,
-                            L"Maximum stations must be between 1 and 200.");
+                            L"Maximum stations must be between 1 and 5000.");
                         SetFocus(GetDlgItem(dlg, kIdTiLimit));
                         return TRUE;
                     }

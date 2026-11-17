@@ -23,8 +23,11 @@ namespace
     constexpr int kIdRbbImport = 1406;
     constexpr int kIdRbbSearch = 1407; // inline search box (edit control)
 
-    // Stations fetched per list.
-    constexpr int kRbbListLimit = 200;
+    // Stations requested per list. This is effectively unlimited (the Radio Browser
+    // server caps a request at 100000 anyway); the only real ceiling is the 32767 items
+    // a standard Win32 list box can hold.
+    constexpr int kRbbListLimit = 100000;
+    constexpr size_t kRbbListBoxMax = 32767;
 
     // Commands on the home level.
     enum home_action
@@ -240,6 +243,10 @@ namespace
                         return compare_names(station_text(a.station, "name"),
                             station_text(b.station, "name")) < 0;
                     });
+
+                // A standard list box cannot hold more than 32767 items.
+                if (m_entries.size() > kRbbListBoxMax)
+                    m_entries.resize(kRbbListBoxMax);
             }
             catch (const exception_aborted&)
             {

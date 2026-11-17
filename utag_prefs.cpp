@@ -1,11 +1,13 @@
 
 #include "utag_ui.h"
 
+#include <commctrl.h>
 #include <uxtheme.h>
 #include <algorithm>
 #include <vector>
 
 #pragma comment(lib, "UxTheme.lib")
+#pragma comment(lib, "Comctl32.lib")
 #pragma comment(lib, "Gdi32.lib")
 
 namespace
@@ -22,6 +24,8 @@ namespace
     constexpr int kPrefPlTunein = 2010;
     constexpr int kPrefPlIcecast = 2011;
     constexpr int kPrefLogoFileOps = 2012;
+    constexpr int kPrefRelativeRefs = 2013;
+    constexpr int kPrefTabs = 2014;
 
     // {85C77DE3-3774-474F-A8EA-87564A3BBDE9}
     static const GUID g_guid_prefs_page =
@@ -53,102 +57,116 @@ namespace
             dialog_template t;
             t.begin(
                 WS_CHILD | DS_CONTROL | WS_VSCROLL,
-                0, 0, 280, 314,
+                0, 0, 280, 312,
                 L"", L"Segoe UI", 8);
 
+            // The tab strip (runtime-created, see create_tabs) occupies the top
+            // 17 dialog units. Tab 1 "General" holds everything except the
+            // Messages and Local files groups, which are on tab 2.
+
+            // ---- Tab 1: General
             // Playback
             t.item(kButton, kGroup,
-                0, 0, 280, 48, 0xFFFF, L"Playback");
+                0, 17, 280, 55, 0xFFFF, L"Playback");
 
             t.item(kButton, kCheck,
-                8, 11, 264, 18, kPrefHandoff,
+                8, 29, 264, 18, kPrefHandoff,
                 L"Reuse the running stream when the playing item is retagged "
                 L"(avoids a reconnect pause)");
 
             t.item(kButton, kCheck,
-                8, 29, 264, 18, kPrefFavicon,
+                8, 49, 264, 18, kPrefFavicon,
                 L"Download the favicon image during playback "
                 L"(saved next to the .utag file)");
 
             // Default folder
             t.item(kButton, kGroup,
-                0, 51, 280, 49, 0xFFFF, L"Default folder");
+                0, 77, 280, 49, 0xFFFF, L"Default folder");
 
             t.item(kStatic, SS_LEFT,
-                8, 62, 264, 15, 0xFFFF,
+                8, 89, 264, 15, 0xFFFF,
                 L"Used by \"Create utag files in default folder\". "
                 L"Leave empty to be asked when needed.");
 
             t.item(kEdit,
                 ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
-                8, 79, 198, 15, kPrefFolder, L"");
+                8, 106, 198, 15, kPrefFolder, L"");
 
             t.item(kButton, BS_PUSHBUTTON | BS_NOTIFY | WS_TABSTOP,
-                212, 77, 60, 19, kPrefBrowse, L"Browse...");
-
-            // Messages
-            t.item(kButton, kGroup,
-                0, 103, 280, 44, 0xFFFF, L"Messages");
-
-            t.item(kButton, kCheck,
-                8, 114, 264, 16, kPrefLogging,
-                L"Write messages to the foobar2000 console");
-
-            t.item(kButton, kCheck,
-                8, 130, 264, 17, kPrefPopups,
-                L"Show a results window after import and create commands "
-                L"(errors are always shown)");
+                212, 104, 60, 19, kPrefBrowse, L"Browse...");
 
             // Radio Browser and TuneIn
             t.item(kButton, kGroup,
-                0, 150, 280, 65, 0xFFFF,
+                0, 131, 280, 72, 0xFFFF,
                 L"Radio Browser and TuneIn");
 
             t.item(kButton, kCheck,
-                8, 161, 264, 25, kPrefCtxLookup,
+                8, 143, 264, 25, kPrefCtxLookup,
                 L"Look each URL up in Radio Browser when creating utag "
                 L"files from playlist tracks (uses its station details)");
 
             t.item(kButton, kCheck,
-                8, 187, 264, 27, kPrefTuneinDetails,
+                8, 171, 264, 27, kPrefTuneinDetails,
                 L"Look up station details (location, description, genre, "
                 L"region) when importing from TuneIn; one extra request "
                 L"per station");
 
             // Playlists
             t.item(kButton, kGroup,
-                0, 218, 280, 53, 0xFFFF,
+                0, 208, 280, 58, 0xFFFF,
                 L"Playlists for the browse windows");
 
             t.item(kStatic, SS_LEFT,
-                8, 231, 62, 15, 0xFFFF, L"Radio Browser:");
+                8, 220, 62, 15, 0xFFFF, L"Radio Browser:");
 
             t.item(kEdit,
                 ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
-                74, 229, 198, 11, kPrefPlRadioBrowser, L"");
+                74, 218, 198, 11, kPrefPlRadioBrowser, L"");
 
             t.item(kStatic, SS_LEFT,
-                8, 245, 62, 15, 0xFFFF, L"TuneIn:");
+                8, 236, 62, 15, 0xFFFF, L"TuneIn:");
 
             t.item(kEdit,
                 ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
-                74, 243, 198, 11, kPrefPlTunein, L"");
+                74, 234, 198, 11, kPrefPlTunein, L"");
 
             t.item(kStatic, SS_LEFT,
-                8, 259, 62, 15, 0xFFFF, L"Icecast:");
+                8, 252, 62, 15, 0xFFFF, L"Icecast:");
 
             t.item(kEdit,
                 ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
-                74, 257, 198, 11, kPrefPlIcecast, L"");
+                74, 250, 198, 11, kPrefPlIcecast, L"");
 
             // Station logos
             t.item(kButton, kGroup,
-                0, 274, 280, 36, 0xFFFF, L"Station logos");
+                0, 271, 280, 37, 0xFFFF, L"Station logos");
 
             t.item(kButton, kCheck,
-                8, 284, 264, 24, kPrefLogoFileOps,
+                8, 283, 264, 24, kPrefLogoFileOps,
                 L"Move, copy and delete the logo image together with its "
                 L".utag file when foobar2000 moves, copies or deletes it");
+
+            // ---- Tab 2: Messages and files
+            // (the group boxes are matched by their titles in tab_of())
+            t.item(kButton, kGroup,
+                0, 17, 280, 49, 0xFFFF, L"Messages");
+
+            t.item(kButton, kCheck,
+                8, 29, 264, 16, kPrefLogging,
+                L"Write messages to the foobar2000 console");
+
+            t.item(kButton, kCheck,
+                8, 47, 264, 17, kPrefPopups,
+                L"Show a results window after import and create commands "
+                L"(errors are always shown)");
+
+            t.item(kButton, kGroup,
+                0, 71, 280, 37, 0xFFFF, L"Local files");
+
+            t.item(kButton, kCheck,
+                8, 83, 264, 24, kPrefRelativeRefs,
+                L"Write local file references as paths relative to the .utag "
+                L"file when creating utag files (same drive only)");
 
             m_hwnd = CreateDialogIndirectParamW(
                 core_api::get_my_instance(),
@@ -190,6 +208,7 @@ namespace
             g_cfg_tunein_details = checked(kPrefTuneinDetails);
             g_cfg_ctx_rb_lookup = checked(kPrefCtxLookup);
             g_cfg_logo_fileops = checked(kPrefLogoFileOps);
+            g_cfg_relative_refs = checked(kPrefRelativeRefs);
 
             g_cfg_playlist_radiobrowser.set_string(
                 playlist_utf8(kPrefPlRadioBrowser).c_str());
@@ -214,6 +233,7 @@ namespace
             set_checked(kPrefTuneinDetails, false);
             set_checked(kPrefCtxLookup, true);
             set_checked(kPrefLogoFileOps, true);
+            set_checked(kPrefRelativeRefs, false);
 
             SetDlgItemTextW(m_hwnd, kPrefPlRadioBrowser, L"RadioBrowser");
             SetDlgItemTextW(m_hwnd, kPrefPlTunein, L"Tunein");
@@ -261,6 +281,7 @@ namespace
                 checked(kPrefTuneinDetails) != static_cast<bool>(g_cfg_tunein_details) ||
                 checked(kPrefCtxLookup) != static_cast<bool>(g_cfg_ctx_rb_lookup) ||
                 checked(kPrefLogoFileOps) != static_cast<bool>(g_cfg_logo_fileops) ||
+                checked(kPrefRelativeRefs) != static_cast<bool>(g_cfg_relative_refs) ||
                 playlist_utf8(kPrefPlRadioBrowser) !=
                 std::string(g_cfg_playlist_radiobrowser.get_ptr()) ||
                 playlist_utf8(kPrefPlTunein) !=
@@ -282,6 +303,7 @@ namespace
             set_checked(kPrefTuneinDetails, g_cfg_tunein_details);
             set_checked(kPrefCtxLookup, g_cfg_ctx_rb_lookup);
             set_checked(kPrefLogoFileOps, g_cfg_logo_fileops);
+            set_checked(kPrefRelativeRefs, g_cfg_relative_refs);
 
             try
             {
@@ -355,12 +377,100 @@ namespace
             bool group = false; // group box: grows with the rows inside it
             bool check = false; // check box: wraps its text, glyph on the left
             bool flow = false;  // height follows the wrapped text
+            int tab = 0;        // page: 0 General, 1 Messages and files, -1 on every page
         };
 
         struct placed
         {
             int x, y, w, h; // unscrolled client coordinates
         };
+
+        // Which page a control belongs to.
+        int tab_of(HWND c, const wchar_t* cls) const
+        {
+            if (c == m_tab)
+                return -1;
+
+            switch (GetDlgCtrlID(c))
+            {
+            case kPrefLogging:
+            case kPrefPopups:
+            case kPrefRelativeRefs:
+                return 1;
+            }
+
+            // Group boxes have no id; they are told apart by their title.
+            if (_wcsicmp(cls, L"Button") == 0 &&
+                (GetWindowLongW(c, GWL_STYLE) & BS_TYPEMASK) == BS_GROUPBOX)
+            {
+                wchar_t text[64]{};
+                GetWindowTextW(c, text, 64);
+                if (_wcsicmp(text, L"Messages") == 0 ||
+                    _wcsicmp(text, L"Local files") == 0)
+                    return 1;
+            }
+
+            return 0;
+        }
+
+        // The tab strip is created at run time: the in-memory dialog template
+        // only takes control classes by atom, and the tab control has none.
+        void create_tabs()
+        {
+            RECT r{ 0, 0, 280, 15 };
+            MapDialogRect(m_hwnd, &r);
+
+            m_tab = CreateWindowExW(
+                0, WC_TABCONTROLW, L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_TABS,
+                0, 0, r.right, r.bottom,
+                m_hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPrefTabs)),
+                core_api::get_my_instance(), nullptr);
+
+            if (!m_tab)
+                return;
+
+            SendMessageW(m_tab, WM_SETFONT,
+                SendMessageW(m_hwnd, WM_GETFONT, 0, 0), TRUE);
+
+            static const wchar_t* const titles[] =
+                { L"General", L"Messages and files" };
+
+            for (int i = 0; i < 2; ++i)
+            {
+                TCITEMW item{};
+                item.mask = TCIF_TEXT;
+                item.pszText = const_cast<wchar_t*>(titles[i]);
+                SendMessageW(m_tab, TCM_INSERTITEMW, i,
+                    reinterpret_cast<LPARAM>(&item));
+            }
+
+            // First in tab order.
+            SetWindowPos(m_tab, HWND_TOP, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+
+        // Shows the controls of the selected page and hides the others.
+        void apply_tab()
+        {
+            for (const ctrl_info& c : m_ctrls)
+            {
+                ShowWindow(c.hwnd,
+                    (c.tab == -1 || c.tab == m_curTab) ? SW_SHOW : SW_HIDE);
+            }
+        }
+
+        void select_tab(int index)
+        {
+            if (index < 0 || index == m_curTab)
+                return;
+
+            m_curTab = index;
+            m_scrollPos = 0;
+            apply_tab();
+            layout();
+        }
 
         void capture_layout()
         {
@@ -410,8 +520,13 @@ namespace
                 {
                     kind = resize_kind::stretch;
                 }
+                else if (_wcsicmp(cls, L"SysTabControl32") == 0)
+                {
+                    kind = resize_kind::stretch;
+                }
 
                 ctrl_info info{ c, r, kind };
+                info.tab = tab_of(c, cls);
 
                 if (_wcsicmp(cls, L"Button") == 0)
                 {
@@ -542,6 +657,10 @@ namespace
 
                     const ctrl_info& f = m_ctrls[j];
 
+                    // Pages are laid out independently.
+                    if (f.tab != c.tab)
+                        continue;
+
                     // A row that ends above this control moves it.
                     if (f.rc.bottom <= c.rc.top)
                         shiftY += delta[j];
@@ -553,7 +672,9 @@ namespace
 
                 out[i].y += shiftY;
                 out[i].h += grow;
-                bottom = (std::max)(bottom, out[i].y + out[i].h);
+
+                if (c.tab == -1 || c.tab == m_curTab)
+                    bottom = (std::max)(bottom, out[i].y + out[i].h);
             }
 
             return bottom + 6;
@@ -733,13 +854,40 @@ namespace
 
         void browse() const
         {
-            const std::wstring start =
-                trim_wide(read_dialog_text(m_hwnd, kPrefFolder));
+            const std::wstring start = resolve_folder_setting(
+                trim_wide(read_dialog_text(m_hwnd, kPrefFolder)));
 
             std::wstring chosen;
 
             if (pick_folder(m_hwnd, start, chosen))
             {
+                // On the same drive as foobar2000: offer a path relative to the
+                // foobar2000 folder, which follows the drive if its letter changes.
+                try
+                {
+                    const std::wstring base = foobar_install_dir();
+                    if (!base.empty())
+                    {
+                        const std::string rel = make_relative_reference(
+                            wide_to_utf8(chosen), wide_to_utf8(base));
+
+                        if (!rel.empty() && rel != wide_to_utf8(chosen) &&
+                            MessageBoxW(m_hwnd,
+                                L"Store the folder relative to the foobar2000 folder?\n\n"
+                                L"A relative path keeps working when the drive letter "
+                                L"changes (for example with a portable install on an "
+                                L"external drive).",
+                                L"Utag Input",
+                                MB_YESNO | MB_ICONQUESTION) == IDYES)
+                        {
+                            chosen = utf8_to_wide(rel);
+                        }
+                    }
+                }
+                catch (...)
+                {
+                }
+
                 SetDlgItemTextW(
                     m_hwnd, kPrefFolder, chosen.c_str());
             }
@@ -763,6 +911,7 @@ namespace
                     reinterpret_cast<LONG_PTR>(self));
 
                 self->m_hwnd = dlg;
+                self->create_tabs();
                 self->m_darkHooks.AddDialogWithControls(dlg);
 
                 // WS_VSCROLL shows a bar from the start; hide it so the design
@@ -776,6 +925,7 @@ namespace
                     GetWindowLongPtrW(dlg, GWL_EXSTYLE) | WS_EX_COMPOSITED);
 
                 self->capture_layout();
+                self->apply_tab();
                 self->load_values();
 
                 return TRUE;
@@ -784,6 +934,18 @@ namespace
                 if (self)
                     self->layout();
                 return TRUE;
+
+            case WM_NOTIFY:
+                if (self && self->m_tab)
+                {
+                    const NMHDR* nm = reinterpret_cast<const NMHDR*>(lp);
+                    if (nm->hwndFrom == self->m_tab && nm->code == TCN_SELCHANGE)
+                    {
+                        self->select_tab(TabCtrl_GetCurSel(self->m_tab));
+                        return TRUE;
+                    }
+                }
+                break;
 
             case WM_VSCROLL:
                 if (self)
@@ -826,6 +988,7 @@ namespace
                 case kPrefTuneinDetails:
                 case kPrefCtxLookup:
                 case kPrefLogoFileOps:
+                case kPrefRelativeRefs:
                     if (HIWORD(wp) == BN_CLICKED)
                         self->m_callback->on_state_changed();
                     break;
@@ -853,6 +1016,8 @@ namespace
         }
 
         HWND m_hwnd = nullptr;
+        HWND m_tab = nullptr;
+        int m_curTab = 0;
 
         bool m_loading = false;
         bool m_inLayout = false;

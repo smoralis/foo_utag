@@ -7,6 +7,14 @@
 // ---- utag_ui_util.cpp
 bool pick_folder(HWND owner, const std::wstring& startDir, std::wstring& result);
 bool get_default_folder(std::wstring& folder, bool forcePick);
+
+// Folder of foobar2000.exe (no trailing backslash); empty if unknown.
+std::wstring foobar_install_dir();
+// Resolves the saved default-folder text: absolute paths are kept, "\Music\utags"
+// is rooted on the drive foobar2000 runs from, and "..\Music\utags" / "Music"
+// are relative to the foobar2000 install folder. Returns the text unchanged if it
+// cannot be resolved.
+std::wstring resolve_folder_setting(const std::wstring& text);
 bool write_unique_utag(const std::wstring& folder, const std::wstring& safeName,
     const std::string& contents, std::string& outputPath);
 std::wstring read_dialog_text(HWND dlg, int id);
